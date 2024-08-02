@@ -99,11 +99,13 @@ where
         unsafe { C::struct_from_raw(pointer) }
     }
 
+    /// Mark the given tracked struct as valid in the current revision.
     pub fn validate<'db>(&'db self, runtime: &'db Runtime, id: Id) {
         Self::validate_in_map(&self.map, runtime, id)
     }
 
-    pub fn validate_in_map<'db>(
+    /// Internal helper to provide shared functionality for [`StructMapView`].
+    fn validate_in_map<'db>(
         map: &'db FxDashMap<Id, Alloc<Value<C>>>,
         runtime: &'db Runtime,
         id: Id,
@@ -209,6 +211,18 @@ where
         unsafe { C::struct_from_raw(data.as_raw()) }
     }
 
+    /// Lookup an existing tracked struct from the map, maybe validating it to current revision.
+    ///
+    /// Validates to current revision if the struct was last created/validated in a revision that
+    /// is still current for the struct's durability. That is, if the struct is HIGH durability
+    /// (created by a HIGH durability query) and was created in R2, and we are now at R3 but no
+    /// HIGH durability input has changed since R2, the struct is still valid and we can validate
+    /// it to R3.
+    ///
+    /// # Panics
+    ///
+    /// * If the value is not present in the map.
+    /// * If the value has not been updated in the last-changed revision for its durability.
     fn get_and_validate_last_changed<'db>(
         map: &'db FxDashMap<Id, Alloc<Value<C>>>,
         runtime: &'db Runtime,
@@ -217,20 +231,13 @@ where
         let data = map.get(&id).unwrap();
 
         // UNSAFE: We permit `&`-access in the current revision once data.created_at
-        // has been updated to the current revision (which we check below).
+        // has been updated to the current revision (which we ensure below).
         let data_ref: &Value<C> = unsafe { data.as_ref() };
 
-        // Before we drop the lock, check that the value has
-        // been updated in the most recent version in which the query that created it could have
-        // changed (based on durability), and validate to the current revision if so.
+        // Before we drop the lock, check that the value has been updated in the most recent
+        // version in which the query that created it could have changed (based on durability).
         let created_at = data_ref.created_at;
         let last_changed = runtime.last_changed_revision(data_ref.durability);
-        dbg!(
-            runtime.current_revision(),
-            created_at,
-            last_changed,
-            data_ref.durability
-        );
         assert!(
             created_at >= last_changed,
             "access to tracked struct from obsolete revision"
@@ -287,7 +294,15 @@ where
         StructMap::get_from_map(&self.map, current_revision, id)
     }
 
-    pub fn get_and_validate_last_changed<'db>(
+    /// Lookup an existing tracked struct from the map, maybe validating it to current revision.
+    ///
+    /// See [`StructMap::get_and_validate_last_changed`].
+    ///
+    /// # Panics
+    ///
+    /// * If the value is not present in the map.
+    /// * If the value has not been updated in the last-changed revision for its durability.
+    pub(super) fn get_and_validate_last_changed<'db>(
         &'db self,
         runtime: &'db Runtime,
         id: Id,

@@ -1,3 +1,23 @@
+/// Test that high durabilities can't cause "access tracked struct from previous revision" panic.
+///
+/// The test models a situation where we have two File inputs (0, 1), where `File(0)` has LOW
+/// durability and `File(1)` has HIGH durability. We can query an `index` for each file, and a
+/// `definitions` from that index (just a sub-part of the index), and we can `infer` each file. The
+/// `index` and `definitions` queries depend only on the `File` they operate on, but the `infer`
+/// query has some other dependencies: `infer(0)` depends on `infer(1)`, and `infer(1)` also
+/// depends directly on `File(0)`.
+///
+/// The panic occurs (in versions of Salsa without a fix) because `definitions(1)` is high
+/// durability, and depends on `index(1)` which is also high durability. `index(1)` creates the
+/// tracked struct `Definition(1)`, and `infer(1)` (which is low durability) depends on
+/// `Definition.file(1)`.
+///
+/// After a change to `File(0)` (low durability), we only shallowly verify `definitions(1)` -- it
+/// passes shallow verification due to durability. We take care to mark-validated the outputs of
+/// `definitions(1)`, but we never verify `index(1)` at all (deeply or shallowly), which means we
+/// never mark `Definition(1)` validated. So when we deep-verify `infer(1)`, we try to access its
+/// dependency `Definition.file(1)`, and hit the panic because we are accessing a tracked struct
+/// that has never been re-validated or re-recreated in R2.
 use salsa::{Durability, Setter};
 
 #[salsa::db]
