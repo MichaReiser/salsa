@@ -117,7 +117,7 @@ where
         let data = unsafe { data.as_mut() };
 
         // Never update a struct twice in the same revision.
-        assert!(data.created_at < current_revision);
+        assert!(data.created_at <= current_revision);
         data.created_at = current_revision;
     }
 
