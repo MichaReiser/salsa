@@ -1,13 +1,11 @@
+use crate::Database;
+use append_only_vec::AppendOnlyVec;
 use std::{
     any::{Any, TypeId},
     marker::PhantomData,
     ops::Deref,
     sync::Arc,
 };
-
-use orx_concurrent_vec::ConcurrentVec;
-
-use crate::Database;
 
 pub struct ViewsOf<Db: Database> {
     upcasts: Views,
@@ -17,7 +15,7 @@ pub struct ViewsOf<Db: Database> {
 #[derive(Clone)]
 pub struct Views {
     source_type_id: TypeId,
-    view_casters: Arc<ConcurrentVec<ViewCaster>>,
+    view_casters: Arc<AppendOnlyVec<ViewCaster>>,
 }
 
 struct ViewCaster {
@@ -63,7 +61,7 @@ impl Views {
         let source_type_id = TypeId::of::<Db>();
         Self {
             source_type_id,
-            view_casters: Default::default(),
+            view_casters: Arc::new(AppendOnlyVec::new()),
         }
     }
 

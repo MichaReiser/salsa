@@ -1,8 +1,7 @@
-use std::any::{Any, TypeId};
-
-use orx_concurrent_vec::ConcurrentVec;
+use append_only_vec::AppendOnlyVec;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use std::any::{Any, TypeId};
 
 use crate::cycle::CycleRecoveryStrategy;
 use crate::ingredient::{Ingredient, Jar};
@@ -226,10 +225,10 @@ pub struct Storage<Db: Database> {
     /// Vector of ingredients.
     ///
     /// Immutable unless the mutex on `ingredients_map` is held.
-    ingredients_vec: ConcurrentVec<Box<dyn Ingredient>>,
+    ingredients_vec: AppendOnlyVec<Box<dyn Ingredient>>,
 
     /// Indices of ingredients that require reset when a new revision starts.
-    ingredients_requiring_reset: ConcurrentVec<IngredientIndex>,
+    ingredients_requiring_reset: AppendOnlyVec<IngredientIndex>,
 
     /// The runtime for this particular salsa database handle.
     /// Each handle gets its own runtime, but the runtimes have shared state between them.
@@ -243,8 +242,8 @@ impl<Db: Database> Default for Storage<Db> {
             upcasts: Default::default(),
             nonce: NONCE.nonce(),
             jar_map: Default::default(),
-            ingredients_vec: Default::default(),
-            ingredients_requiring_reset: Default::default(),
+            ingredients_vec: AppendOnlyVec::new(),
+            ingredients_requiring_reset: AppendOnlyVec::new(),
             runtime: Runtime::default(),
         }
     }
@@ -285,7 +284,7 @@ impl<Db: Database> Storage<Db> {
                     expected_index.as_usize(),
                     actual_index,
                     "ingredient `{:?}` was predicted to have index `{:?}` but actually has index `{:?}`",
-                    self.ingredients_vec.get(actual_index).unwrap(),
+                    self.ingredients_vec[actual_index],
                     expected_index,
                     actual_index,
                 );
@@ -301,7 +300,7 @@ impl<Db: Database> Storage<Db> {
     }
 
     pub fn lookup_ingredient(&self, index: IngredientIndex) -> &dyn Ingredient {
-        &**self.ingredients_vec.get(index.as_usize()).unwrap()
+        &**(&self.ingredients_vec[index.as_usize()])
     }
 
     fn lookup_ingredient_mut(
@@ -311,14 +310,11 @@ impl<Db: Database> Storage<Db> {
         self.runtime.new_revision();
 
         for index in self.ingredients_requiring_reset.iter() {
-            self.ingredients_vec
-                .get_mut(index.as_usize())
-                .unwrap()
-                .reset_for_new_revision();
+            self.ingredients_vec[index.as_usize()].reset_for_new_revision();
         }
 
         (
-            &mut **self.ingredients_vec.get_mut(index.as_usize()).unwrap(),
+            &mut **(&mut self.ingredients_vec[index.as_usize()]),
             &mut self.runtime,
         )
     }
