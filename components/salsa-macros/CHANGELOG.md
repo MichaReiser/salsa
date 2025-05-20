@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0](https://github.com/MichaReiser/salsa/compare/salsa-macros-v0.21.1...salsa-macros-v0.22.0) - 2025-05-20
+
+### Other
+
+- Implement an `!Update` bound escape hatch for tracked fn ([#867](https://github.com/MichaReiser/salsa/pull/867))
+- Fix returns(deref | as_ref | as_deref) in tracked methods ([#857](https://github.com/MichaReiser/salsa/pull/857))
+- Changed `return_ref` syntax to `returns(as_ref)` and `returns(cloned)` ([#772](https://github.com/MichaReiser/salsa/pull/772))
+- Move salsa event system into `Zalsa` ([#849](https://github.com/MichaReiser/salsa/pull/849))
+
 ## [0.21.0](https://github.com/salsa-rs/salsa/compare/salsa-macros-v0.20.0...salsa-macros-v0.21.0) - 2025-04-29
 
 ### Fixed
