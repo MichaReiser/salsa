@@ -16,7 +16,6 @@
 //!
 //! Specifically, the maybe_changed_after flow.
 
-use crate::sync;
 use crate::sync::thread;
 
 use salsa::{CycleRecoveryAction, DatabaseImpl, Setter as _};
@@ -70,47 +69,28 @@ fn initial(_db: &dyn salsa::Database, _input: Input) -> CycleValue {
 #[test_log::test]
 fn the_test() {
     crate::sync::check(move || {
-        // This is a bit silly but it works around https://github.com/awslabs/shuttle/issues/192
-        static INITIALIZE: sync::Mutex<Option<(salsa::DatabaseImpl, Input)>> =
-            sync::Mutex::new(None);
+        let mut db = DatabaseImpl::default();
 
-        fn get_db(f: impl FnOnce(&salsa::DatabaseImpl, Input)) -> (salsa::DatabaseImpl, Input) {
-            let mut shared = INITIALIZE.lock().unwrap();
+        let input = Input::new(&db, 1);
 
-            if let Some((db, input)) = shared.as_ref() {
-                return (db.clone(), *input);
-            }
+        query_a(&db, input);
 
-            let mut db = DatabaseImpl::default();
+        input.set_value(&mut db).to(2);
 
-            let input = Input::new(&db, 1);
+        let db_1 = db.clone();
+        let db_2 = db.clone();
+        let db_3 = db;
 
-            f(&db, input);
-
-            input.set_value(&mut db).to(2);
-
-            *shared = Some((db.clone(), input));
-
-            (db, input)
-        }
-
-        let t1 = thread::spawn(|| {
-            let (db, input) = get_db(|db, input| {
-                query_a(db, input);
-            });
-
+        let t1 = thread::spawn(move || {
+            let db = db_1;
             query_a(&db, input)
         });
-        let t2 = thread::spawn(|| {
-            let (db, input) = get_db(|db, input| {
-                query_b(db, input);
-            });
+        let t2 = thread::spawn(move || {
+            let db = db_2;
             query_b(&db, input)
         });
-        let t3 = thread::spawn(|| {
-            let (db, input) = get_db(|db, input| {
-                query_c(db, input);
-            });
+        let t3 = thread::spawn(move || {
+            let db = db_3;
             query_c(&db, input)
         });
 
