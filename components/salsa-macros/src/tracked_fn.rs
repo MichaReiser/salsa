@@ -129,6 +129,24 @@ impl Macro {
             }
         };
 
+        let clone = if self.args.cycle_fn.is_some() {
+            quote!(Clone::clone(old_value))
+        } else {
+            quote_spanned!(output_ty.span() =>
+                panic!("Only supported for tracked functions with cycle detection")
+            )
+        };
+        // we need to generate the entire function here
+        // as the locals (parameters) will have def site hygiene otherwise
+        // if emitted in the decl macro
+        let clone = quote! {
+            fn value_clone<#db_lt>(
+                old_value: &Self::Output<#db_lt>,
+            ) -> Self::Output<#db_lt> {
+                #clone
+            }
+        };
+
         let mut inner_fn = item.clone();
         inner_fn.vis = syn::Visibility::Inherited;
         inner_fn.sig.ident = self.hygiene.ident("inner");
@@ -229,6 +247,7 @@ impl Macro {
                 cycle_recovery_strategy: #cycle_recovery_strategy,
                 is_specifiable: #is_specifiable,
                 values_equal: {#eq},
+                value_clone: {#clone},
                 needs_interner: #needs_interner,
                 heap_size_fn: #(#heap_size_fn)*,
                 lru: #lru,

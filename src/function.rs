@@ -72,6 +72,8 @@ pub trait Configuration: Any {
     /// This invokes user code in form of the `Eq` impl.
     fn values_equal<'db>(old_value: &Self::Output<'db>, new_value: &Self::Output<'db>) -> bool;
 
+    fn value_clone<'db>(old_value: &Self::Output<'db>) -> Self::Output<'db>;
+
     /// Convert from the id used internally to the value that execute is expecting.
     /// This is a no-op if the input to the function is a salsa struct.
     fn id_to_input(zalsa: &Zalsa, key: Id) -> Self::Input<'_>;

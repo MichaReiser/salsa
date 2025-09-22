@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::cycle::{CycleHeads, CycleRecoveryStrategy, IterationCount};
-use crate::function::maybe_changed_after::VerifyCycleHeads;
+use crate::function::maybe_changed_after::{ShallowUpdate, VerifyCycleHeads};
 use crate::function::memo::Memo;
 use crate::function::sync::ClaimResult;
 use crate::function::{Configuration, IngredientImpl};
@@ -284,8 +284,26 @@ where
                     "hit cycle at {database_key_index:#?}, \
                     inserting and returning fixpoint initial value"
                 );
+
+                // I think we need to copy over the cycle input/outputs in this case.
+                let initial_value = memo_guard
+                    .and_then(|memo| {
+                        let old_value = memo.value.as_ref()?;
+                        let can_shallow_update =
+                            self.shallow_verify_memo(zalsa, database_key_index, memo);
+
+                        // TODO: We shouldn't copy the old value if the outer most query changed. This can happen
+                        // for cycles that spawn multiple threads initially, but are later owned by a single thread.
+                        if can_shallow_update == ShallowUpdate::Verified {
+                            Some(C::value_clone(old_value))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| C::cycle_initial(db, C::id_to_input(zalsa, id)));
+
                 let revisions = QueryRevisions::fixpoint_initial(database_key_index);
-                let initial_value = C::cycle_initial(db, C::id_to_input(zalsa, id));
+
                 self.insert_memo(
                     zalsa,
                     id,

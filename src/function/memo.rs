@@ -644,6 +644,10 @@ mod _memory_usage {
             unimplemented!()
         }
 
+        fn value_clone<'db>(old_value: &Self::Output<'db>) -> Self::Output<'db> {
+            unimplemented!()
+        }
+
         fn id_to_input(_: &Zalsa, _: Id) -> Self::Input<'_> {
             unimplemented!()
         }

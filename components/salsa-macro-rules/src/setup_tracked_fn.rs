@@ -52,6 +52,8 @@ macro_rules! setup_tracked_fn {
         // Equality check strategy function
         values_equal: {$($values_equal:tt)+},
 
+        value_clone: {$($value_clone:tt)+},
+
         // If true, the input needs an interner (because it has >1 argument).
         needs_interner: $needs_interner:tt,
 
@@ -305,6 +307,8 @@ macro_rules! setup_tracked_fn {
                 fn cycle_initial<$db_lt>(db: &$db_lt Self::DbView, ($($input_id),*): ($($interned_input_ty),*)) -> Self::Output<$db_lt> {
                     $($cycle_recovery_initial)*(db, $($input_id),*)
                 }
+
+                $($value_clone)+
 
                 fn recover_from_cycle<$db_lt>(
                     db: &$db_lt dyn $Db,

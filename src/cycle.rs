@@ -159,6 +159,10 @@ impl CycleHeads {
             .any(|head| head.database_key_index == *value)
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
     pub(crate) fn remove(&mut self, value: &DatabaseKeyIndex) -> bool {
         let found = self
             .0
