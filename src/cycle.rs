@@ -45,7 +45,6 @@
 //! hangs (but not deadlocks).
 
 use std::iter::FusedIterator;
-use thin_vec::{thin_vec, ThinVec};
 
 use crate::key::DatabaseKeyIndex;
 use crate::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -157,7 +156,7 @@ impl std::fmt::Display for IterationCount {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct AtomicIterationCount(AtomicU8);
 
 impl AtomicIterationCount {
@@ -173,7 +172,7 @@ impl AtomicIterationCount {
         self.0.store(value.0, Ordering::Release);
     }
 
-    pub(crate) fn store_mut(&mut self, value: IterationCount) {
+    pub(crate) fn set(&mut self, value: IterationCount) {
         *self.0.get_mut() = value.0;
     }
 }
@@ -214,7 +213,7 @@ impl<'de> serde::Deserialize<'de> for AtomicIterationCount {
 /// plural in case of nested cycles) representing the cycles it is part of, and the current
 /// iteration count for each cycle head. This struct tracks these cycle heads.
 #[derive(Clone, Debug, Default)]
-pub struct CycleHeads(ThinVec<CycleHead>);
+pub struct CycleHeads(Vec<CycleHead>);
 
 impl CycleHeads {
     pub(crate) fn is_empty(&self) -> bool {
@@ -225,10 +224,10 @@ impl CycleHeads {
         database_key_index: DatabaseKeyIndex,
         iteration_count: IterationCount,
     ) -> Self {
-        Self(thin_vec![CycleHead {
+        Self(vec![CycleHead {
             database_key_index,
             iteration_count: iteration_count.into(),
-            removed: false.into()
+            removed: false.into(),
         }])
     }
 
@@ -284,7 +283,7 @@ impl CycleHeads {
             .iter_mut()
             .find(|cycle_head| cycle_head.database_key_index == cycle_head_index)
         {
-            cycle_head.iteration_count.store_mut(new_iteration_count);
+            cycle_head.iteration_count.set(new_iteration_count);
         }
     }
 
@@ -329,7 +328,7 @@ impl CycleHeads {
 
             if *removed {
                 *removed = false;
-                existing.iteration_count.store_mut(iteration_count);
+                existing.iteration_count.set(iteration_count);
 
                 true
             } else {
@@ -382,14 +381,14 @@ impl<'de> serde::Deserialize<'de> for CycleHeads {
     where
         D: serde::Deserializer<'de>,
     {
-        let vec: ThinVec<CycleHead> = serde::Deserialize::deserialize(deserializer)?;
+        let vec: Vec<CycleHead> = serde::Deserialize::deserialize(deserializer)?;
         Ok(CycleHeads(vec))
     }
 }
 
 impl IntoIterator for CycleHeads {
     type Item = CycleHead;
-    type IntoIter = <ThinVec<Self::Item> as IntoIterator>::IntoIter;
+    type IntoIter = <Vec<Self::Item> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -443,14 +442,14 @@ impl<'a> std::iter::IntoIterator for &'a CycleHeads {
 
 impl From<CycleHead> for CycleHeads {
     fn from(value: CycleHead) -> Self {
-        Self(thin_vec![value])
+        Self(vec![value])
     }
 }
 
 #[inline]
 pub(crate) fn empty_cycle_heads() -> &'static CycleHeads {
     static EMPTY_CYCLE_HEADS: OnceLock<CycleHeads> = OnceLock::new();
-    EMPTY_CYCLE_HEADS.get_or_init(|| CycleHeads(ThinVec::new()))
+    EMPTY_CYCLE_HEADS.get_or_init(CycleHeads::default)
 }
 
 #[derive(Clone)]
@@ -465,6 +464,88 @@ impl Iterator for CycleHeadIdsIterator<'_> {
         self.inner
             .next()
             .map(|head| head.database_key_index.key_index())
+    }
+}
+
+/// The memo's cycle related metadata.
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
+pub(crate) struct CycleMetadata {
+    /// This result was computed based on provisional values from
+    /// these cycle heads. The "cycle head" is the query responsible
+    /// for managing a fixpoint iteration. In a cycle like
+    /// `--> A --> B --> C --> A`, the cycle head is query `A`: it is
+    /// the query whose value is requested while it is executing,
+    /// which must provide the initial provisional value and decide,
+    /// after each iteration, whether the cycle has converged or must
+    /// iterate again.
+    heads: CycleHeads,
+
+    iteration: AtomicIterationCount,
+
+    /// Stores for nested cycle heads whether they've converged in the last iteration.
+    /// This value is always `false` for other queries.
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    converged: bool,
+}
+
+impl CycleMetadata {
+    pub(crate) fn new(heads: CycleHeads, iteration: IterationCount) -> Option<Self> {
+        if heads.is_empty() && iteration.is_initial() {
+            None
+        } else {
+            Some(Self {
+                heads,
+                iteration: iteration.into(),
+                converged: false,
+            })
+        }
+    }
+
+    pub(crate) fn set_heads(&mut self, heads: CycleHeads) {
+        self.heads = heads;
+    }
+
+    pub(crate) fn is_default(&self) -> bool {
+        self.heads.is_empty() && self.iteration.load().is_initial() && !self.converged
+    }
+
+    pub(crate) fn iteration(&self) -> IterationCount {
+        self.iteration.load()
+    }
+
+    pub(crate) fn set_iteration(&mut self, iteration: IterationCount) {
+        self.iteration.set(iteration)
+    }
+
+    pub(crate) fn store_iteration(&self, iteration: IterationCount) {
+        self.iteration.store(iteration);
+    }
+
+    pub(crate) fn converged(&self) -> bool {
+        self.converged
+    }
+
+    pub(crate) fn set_converged(&mut self, cycle_converged: bool) {
+        self.converged = cycle_converged;
+    }
+
+    pub(crate) fn heads(&self) -> &CycleHeads {
+        &self.heads
+    }
+
+    pub(crate) fn heads_mut(&mut self) -> &mut CycleHeads {
+        &mut self.heads
+    }
+
+    #[cfg(feature = "salsa_unstable")]
+    pub(crate) fn allocation_size(&self) -> usize {
+        let Self {
+            heads,
+            iteration: _,
+            converged: _,
+        } = self;
+        heads.allocation_size()
     }
 }
 

@@ -5,6 +5,7 @@ use crate::accumulator::{
     accumulated_map::{AccumulatedMap, AtomicInputAccumulatedValues, InputAccumulatedValues},
     Accumulator,
 };
+use crate::cycle::CycleMetadata;
 use crate::hash::FxIndexSet;
 use crate::key::DatabaseKeyIndex;
 use crate::runtime::Stamp;
@@ -217,8 +218,7 @@ impl ActiveQuery {
             #[cfg(feature = "accumulator")]
             mem::take(accumulated),
             active_tracked_structs,
-            mem::take(cycle_heads),
-            iteration_count,
+            CycleMetadata::new(mem::take(cycle_heads), iteration_count),
         );
 
         let revisions = QueryRevisions {
