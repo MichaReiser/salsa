@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use crate::cycle::{
     CycleHeads, CycleHeadsIterator, IterationStamp, ProvisionalStatus, empty_cycle_heads,
 };
-use crate::function::{Configuration, IngredientImpl};
+use crate::function::{Configuration, EvictionPolicy, IngredientImpl};
 use crate::ingredient::WaitForResult;
 use crate::key::DatabaseKeyIndex;
 use crate::revision::AtomicRevision;
@@ -80,6 +80,76 @@ impl<C: Configuration> IngredientImpl<C> {
 
         table.map_memo(memo_ingredient_index, map)
     }
+
+    /// Retires the current memo for `id` by replacing it with an equivalent
+    /// value-less memo.
+    ///
+    /// Unlike [`Self::evict_value_from_memo_for`], this can run with `&self`.
+    /// The old memo allocation remains alive in `deleted_entries`, and its
+    /// value is dropped once active guarded readers have exited.
+    pub(super) fn evict_value_from_memo(&self, zalsa: &Zalsa, id: Id) -> bool {
+        let memo_ingredient_index = self.memo_ingredient_index(zalsa, id);
+        let Some(old_memo) = self.get_memo_from_table_for(zalsa, id, memo_ingredient_index) else {
+            return true;
+        };
+
+        if old_memo.value.is_none() {
+            return true;
+        }
+
+        if !matches!(
+            old_memo.revisions.origin.as_ref(),
+            QueryOriginRef::Derived(_)
+        ) {
+            return false;
+        }
+
+        if old_memo.may_be_provisional() && old_memo.verified_at.load() == zalsa.current_revision()
+        {
+            return false;
+        }
+
+        let Some(revisions) = old_memo.revisions.clone_for_eviction() else {
+            return false;
+        };
+
+        let verified_at = old_memo.verified_at.load();
+        let new_memo = NonNull::from(Box::leak(Box::new(Memo::new(None, verified_at, revisions))));
+        let old_memo = NonNull::from(old_memo);
+
+        // SAFETY: The memo table stores `'static` memos to support type erasure.
+        // The evicted memo has no value, so it does not carry borrowed output data.
+        let new_memo =
+            unsafe { transmute::<NonNull<Memo<'_, C>>, NonNull<Memo<'static, C>>>(new_memo) };
+        // SAFETY: The table stores this memo as `'static`; the allocation stays
+        // alive through `deleted_entries`.
+        let old_memo =
+            unsafe { transmute::<NonNull<Memo<'_, C>>, NonNull<Memo<'static, C>>>(old_memo) };
+
+        match zalsa
+            .memo_table_for::<C::SalsaStruct<'_>>(id)
+            .compare_exchange(memo_ingredient_index, old_memo, new_memo)
+        {
+            Ok(old_memo) => {
+                // SAFETY: The pointer came from the current database.
+                let old_memo = unsafe {
+                    transmute::<NonNull<Memo<'static, C>>, NonNull<Memo<'_, C>>>(old_memo)
+                };
+                // SAFETY: The old memo was just removed from the table. It must
+                // stay allocated until all outstanding references are gone.
+                unsafe {
+                    self.deleted_entries.push(old_memo);
+                    self.deleted_entries.push_value_to_drop(old_memo);
+                }
+                true
+            }
+            Err(new_memo) => {
+                // SAFETY: The new memo was never published.
+                unsafe { drop(Box::from_raw(new_memo.as_ptr())) };
+                false
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -107,6 +177,16 @@ impl<'db, C: Configuration> Memo<'db, C> {
         );
         Memo {
             value,
+            verified_at: AtomicRevision::from(revision_now),
+            revisions,
+        }
+    }
+
+    pub(super) fn poisoned(revision_now: Revision, mut revisions: QueryRevisions) -> Self {
+        revisions.set_poisoned();
+
+        Memo {
+            value: None,
             verified_at: AtomicRevision::from(revision_now),
             revisions,
         }
@@ -186,6 +266,7 @@ impl<'db, C: Configuration> Memo<'db, C> {
                             &"None"
                         },
                     )
+                    .field("poisoned", &self.memo.revisions.poisoned())
                     .field("verified_at", &self.memo.verified_at)
                     .field("revisions", &self.memo.revisions)
                     .finish()
@@ -214,7 +295,11 @@ where
     #[cfg(feature = "salsa_unstable")]
     fn memory_usage(&self) -> crate::database::MemoInfo {
         let size_of = std::mem::size_of::<Memo<C>>() + self.revisions.allocation_size();
-        let heap_size = if let Some(value) = self.value.as_ref() {
+        let heap_size = if C::Eviction::RETIRES_VALUES {
+            // Volatile eviction can clear a retired value concurrently. Avoid
+            // inspecting values when collecting unstable memory diagnostics.
+            None
+        } else if let Some(value) = self.value.as_ref() {
             C::heap_size(value)
         } else {
             Some(0)

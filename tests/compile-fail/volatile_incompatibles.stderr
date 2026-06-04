@@ -1,0 +1,23 @@
+error: the `volatile` and `lru` options cannot be used together
+ --> tests/compile-fail/volatile_incompatibles.rs:8:18
+  |
+8 | #[salsa::tracked(volatile = 3, lru = 3)]
+  |                  ^^^^^^^^
+
+error: the `volatile` and `specify` options cannot be used together
+  --> tests/compile-fail/volatile_incompatibles.rs:13:32
+   |
+13 | #[salsa::tracked(volatile = 3, specify)]
+   |                                ^^^^^^^
+
+error: the `volatile` and `unsafe(non_update_types)` options cannot be used together
+  --> tests/compile-fail/volatile_incompatibles.rs:18:39
+   |
+18 | #[salsa::tracked(volatile = 3, unsafe(non_update_types))]
+   |                                       ^^^^^^^^^^^^^^^^
+
+error: the `volatile` option cannot be used with reference return modes
+  --> tests/compile-fail/volatile_incompatibles.rs:23:40
+   |
+23 | #[salsa::tracked(volatile = 3, returns(ref))]
+   |                                        ^^^

@@ -64,6 +64,9 @@ macro_rules! setup_tracked_fn {
         // LRU capacity (a literal, maybe 0)
         lru: $lru:tt,
 
+        // If true, the query is volatile and may retire memo values within a revision.
+        is_volatile: $is_volatile:tt,
+
         // The return mode for the function, see `salsa_macros::options::Option::returns`
         return_mode: $return_mode:tt,
 
@@ -97,15 +100,23 @@ macro_rules! setup_tracked_fn {
 
             $zalsa::attach($db, || {
                 let (zalsa, zalsa_local) = $db.zalsas();
+                let ingredient = $fn_name::fn_ingredient_($db, zalsa);
+                $zalsa::macro_if! {
+                    $is_volatile => let _guard = ingredient.memo_read_guard();
+                }
                 let result = $zalsa::macro_if! {
                     if $needs_interner {
                         {
                             let key = $fn_name::intern_ingredient_(zalsa).intern_id(zalsa, zalsa_local, ($($input_id),*), |_, data| data);
-                            $fn_name::fn_ingredient_($db, zalsa).fetch($db, zalsa, zalsa_local, key)
+                            // SAFETY: Volatile queries hold `_guard` until the
+                            // returned value has been copied or cloned.
+                            unsafe { ingredient.fetch($db, zalsa, zalsa_local, key) }
                         }
                     } else {
                         {
-                            $fn_name::fn_ingredient_($db, zalsa).fetch($db, zalsa, zalsa_local, $zalsa::AsId::as_id(&($($input_id),*)))
+                            // SAFETY: Volatile queries hold `_guard` until the
+                            // returned value has been copied or cloned.
+                            unsafe { ingredient.fetch($db, zalsa, zalsa_local, $zalsa::AsId::as_id(&($($input_id),*))) }
                         }
                     }
                 };

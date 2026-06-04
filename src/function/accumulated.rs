@@ -1,6 +1,6 @@
 use crate::accumulator::accumulated_map::{AccumulatedMap, InputAccumulatedValues};
 use crate::accumulator::{self};
-use crate::function::{Configuration, IngredientImpl};
+use crate::function::{Configuration, EvictionPolicy, IngredientImpl};
 use crate::hash::FxHashSet;
 use crate::zalsa::ZalsaDatabase;
 use crate::zalsa_local::QueryOriginRef;
@@ -16,6 +16,7 @@ where
     where
         A: accumulator::Accumulator,
     {
+        let _guard = C::Eviction::RETIRES_VALUES.then(|| self.memo_read_guard());
         let (zalsa, zalsa_local) = db.zalsas();
 
         // NOTE: We don't have a precise way to track accumulated values at present,
@@ -37,7 +38,8 @@ where
         let mut output = vec![];
 
         // First ensure the result is up to date
-        self.fetch(db, zalsa, zalsa_local, key);
+        // SAFETY: `_guard` protects volatile memo values until this method returns.
+        unsafe { self.fetch(db, zalsa, zalsa_local, key) };
 
         let db_key = self.database_key_index(key);
         let mut visited: FxHashSet<DatabaseKeyIndex> = FxHashSet::default();

@@ -5,9 +5,11 @@
 
 mod lru;
 mod noop;
+mod volatile;
 
 pub use lru::Lru;
 pub use noop::NoopEviction;
+pub use volatile::Volatile;
 
 use crate::Id;
 
@@ -16,20 +18,32 @@ use crate::Id;
 /// Implementations control when memoized values are evicted from the cache.
 /// The eviction policy is selected at compile time via the `Configuration` trait.
 pub trait EvictionPolicy: Send + Sync {
+    /// Whether this policy can retire memo values within a revision.
+    const RETIRES_VALUES: bool = false;
+
     /// Create a new eviction policy with the given capacity.
     fn new(capacity: usize) -> Self;
 
     /// Record that an item was accessed.
     fn record_use(&self, id: Id);
 
+    /// Record that an item had a value inserted into its memo.
+    ///
+    /// Returns `true` if the policy crossed an eviction point and the
+    /// ingredient should run an eviction pass.
+    fn record_insert(&self, id: Id) -> bool {
+        self.record_use(id);
+        false
+    }
+
     /// Set the maximum capacity.
     fn set_capacity(&mut self, capacity: usize);
 
     /// Iterate over items that should be evicted.
     ///
-    /// Called once per revision during `reset_for_new_revision`.
+    /// Called at eviction points, including `reset_for_new_revision`.
     /// The callback `cb` should be invoked for each item to evict.
-    fn for_each_evicted(&mut self, cb: impl FnMut(Id));
+    fn for_each_evicted(&self, cb: impl FnMut(Id) -> bool);
 }
 
 /// Marker trait for eviction policies that have a configurable capacity.

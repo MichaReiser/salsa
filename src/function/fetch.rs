@@ -12,7 +12,11 @@ where
     C: Configuration,
 {
     #[inline]
-    pub fn fetch<'db>(
+    /// # Safety
+    ///
+    /// If this is a volatile query, the caller must hold a memo read guard until
+    /// it has finished using the returned reference.
+    pub unsafe fn fetch<'db>(
         &'db self,
         db: &'db C::DbView,
         zalsa: &'db Zalsa,

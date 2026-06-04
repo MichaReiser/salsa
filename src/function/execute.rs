@@ -149,20 +149,22 @@ where
                 //    (we can't rely on `iteration` being updated for nested cycles because the nested cycles may have completed successfully).
                 // b) It's guaranteed that this query will panic again anyway.
                 // That's why we simply propagate the panic here. It simplifies our lives and it also avoids duplicate panic messages.
-                if old_memo.value.is_none() {
+                if old_memo.revisions.poisoned() {
                     tracing::warn!(
                         "Propagating panic for cycle head that panicked in an earlier execution in that revision"
                     );
                     Cancelled::PropagatedPanic.throw();
                 }
 
-                // Only use the last provisional memo if it was a cycle head in the last iteration. This is to
-                // force at least two executions.
-                if old_memo.cycle_heads().contains(&database_key_index) {
-                    last_provisional_memo_opt = Some(old_memo);
-                }
+                if old_memo.value.is_some() {
+                    // Only use the last provisional memo if it was a cycle head in the last iteration. This is to
+                    // force at least two executions.
+                    if old_memo.cycle_heads().contains(&database_key_index) {
+                        last_provisional_memo_opt = Some(old_memo);
+                    }
 
-                iteration = old_memo.revisions.iteration();
+                    iteration = old_memo.revisions.iteration();
+                }
             }
         }
 
@@ -382,6 +384,9 @@ where
             // * ensure the final returned memo depends on all inputs from all iterations.
             if old_memo.may_be_provisional()
                 && old_memo.verified_at.load() == zalsa.current_revision()
+                // Same-revision is no longer enough once volatile eviction can
+                // discard a provisional value and later recompute it in-place.
+                && old_memo.value.is_some()
             {
                 active_query.seed_iteration(&old_memo.revisions);
             }
@@ -445,7 +450,7 @@ impl<C: Configuration> Drop for PoisonProvisionalIfPanicking<'_, C> {
                 IterationStamp::initial(self.zalsa.runtime().cancellation_count()),
             );
 
-            let memo = Memo::new(None, self.zalsa.current_revision(), revisions);
+            let memo = Memo::poisoned(self.zalsa.current_revision(), revisions);
             self.ingredient
                 .insert_memo(self.zalsa, self.id, memo, self.memo_ingredient_index);
         }

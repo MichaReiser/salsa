@@ -19,5 +19,5 @@ impl EvictionPolicy for NoopEviction {
     fn set_capacity(&mut self, _capacity: usize) {}
 
     #[inline(always)]
-    fn for_each_evicted(&mut self, _cb: impl FnMut(Id)) {}
+    fn for_each_evicted(&self, _cb: impl FnMut(Id) -> bool) {}
 }

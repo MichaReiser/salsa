@@ -497,6 +497,18 @@ pub(crate) struct QueryRevisions {
 }
 
 impl QueryRevisions {
+    pub(crate) fn clone_for_eviction(&self) -> Option<Self> {
+        Some(Self {
+            changed_at: self.changed_at,
+            durability: self.durability,
+            origin: self.origin.clone_for_eviction(),
+            #[cfg(feature = "accumulator")]
+            accumulated_inputs: self.accumulated_inputs.clone(),
+            verified_final: AtomicBool::new(self.verified_final.load(Ordering::Relaxed)),
+            extra: self.extra.clone_for_eviction()?,
+        })
+    }
+
     #[cfg(feature = "salsa_unstable")]
     pub(crate) fn allocation_size(&self) -> usize {
         let QueryRevisions {
@@ -563,10 +575,32 @@ impl QueryRevisionsExtra {
                 tracked_struct_ids,
                 iteration: iteration.into(),
                 cycle_converged: false,
+                poisoned: false,
             }))
         };
 
         Self(inner)
+    }
+
+    fn clone_for_eviction(&self) -> Option<Self> {
+        let Some(extra) = &self.0 else {
+            return Some(Self(None));
+        };
+
+        #[cfg(feature = "accumulator")]
+        if !extra.accumulated.is_empty() {
+            return None;
+        }
+
+        Some(Self(Some(Box::new(QueryRevisionsExtraInner {
+            #[cfg(feature = "accumulator")]
+            accumulated: AccumulatedMap::default(),
+            cycle_heads: extra.cycle_heads.clone(),
+            tracked_struct_ids: extra.tracked_struct_ids.clone(),
+            iteration: extra.iteration.load().into(),
+            cycle_converged: extra.cycle_converged,
+            poisoned: extra.poisoned,
+        }))))
     }
 }
 
@@ -616,6 +650,11 @@ struct QueryRevisionsExtraInner {
     /// This value is always `false` for other queries.
     #[cfg_attr(feature = "persistence", serde(skip))]
     cycle_converged: bool,
+
+    /// True if the memo is a poison marker for a provisional cycle result
+    /// that panicked while computing.
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    poisoned: bool,
 }
 
 impl QueryRevisionsExtraInner {
@@ -628,6 +667,7 @@ impl QueryRevisionsExtraInner {
             cycle_heads,
             iteration: _,
             cycle_converged: _,
+            poisoned: _,
         } = self;
 
         #[cfg(feature = "accumulator")]
@@ -660,7 +700,8 @@ impl fmt::Debug for QueryRevisionsExtraInner {
 
         f.field("cycle_heads", &self.cycle_heads)
             .field("iteration", &self.iteration)
-            .field("cycle_converged", &self.cycle_converged);
+            .field("cycle_converged", &self.cycle_converged)
+            .field("poisoned", &self.poisoned);
 
         #[cfg(feature = "accumulator")]
         {
@@ -754,6 +795,14 @@ impl QueryRevisions {
         }
     }
 
+    pub(crate) fn poisoned(&self) -> bool {
+        self.extra().is_some_and(|extra| extra.poisoned)
+    }
+
+    pub(crate) fn set_poisoned(&mut self) {
+        self.get_or_insert_extra().poisoned = true;
+    }
+
     pub(crate) fn iteration(&self) -> IterationStamp {
         match &self.extra.0 {
             Some(extra) => extra.iteration.load(),
@@ -776,6 +825,20 @@ impl QueryRevisions {
         extra
             .cycle_heads
             .update_iteration_count(database_key_index, iteration);
+    }
+
+    fn get_or_insert_extra(&mut self) -> &mut QueryRevisionsExtraInner {
+        self.extra.0.get_or_insert_with(|| {
+            Box::new(QueryRevisionsExtraInner {
+                #[cfg(feature = "accumulator")]
+                accumulated: AccumulatedMap::default(),
+                tracked_struct_ids: ThinVec::default(),
+                cycle_heads: empty_cycle_heads().clone(),
+                iteration: IterationStamp::default().into(),
+                cycle_converged: false,
+                poisoned: false,
+            })
+        })
     }
 
     fn extra(&self) -> Option<&QueryRevisionsExtraInner> {
@@ -928,6 +991,14 @@ unsafe impl Send for QueryOriginData {}
 unsafe impl Sync for QueryOriginData {}
 
 impl QueryOrigin {
+    fn clone_for_eviction(&self) -> QueryOrigin {
+        match self.as_ref() {
+            QueryOriginRef::Assigned(key) => QueryOrigin::assigned(key),
+            QueryOriginRef::Derived(edges) => QueryOrigin::derived(edges.into()),
+            QueryOriginRef::DerivedUntracked(edges) => QueryOrigin::derived_untracked(edges.into()),
+        }
+    }
+
     pub fn is_derived_untracked(&self) -> bool {
         matches!(self.kind, QueryOriginKind::DerivedUntracked)
     }

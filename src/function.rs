@@ -5,7 +5,7 @@ use std::any::Any;
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::cycle::{CycleRecoveryStrategy, IterationStamp, ProvisionalStatus};
 use crate::database::RawDatabase;
@@ -37,9 +37,42 @@ mod memo;
 mod specify;
 mod sync;
 
-pub use eviction::{EvictionPolicy, HasCapacity, Lru, NoopEviction};
+pub use eviction::{EvictionPolicy, HasCapacity, Lru, NoopEviction, Volatile};
 
 pub type Memo<C> = memo::Memo<'static, C>;
+
+const MEMO_READER_SHARDS: usize = 32;
+
+static NEXT_MEMO_READER_SHARD: AtomicUsize = AtomicUsize::new(0);
+
+crate::sync::thread_local! {
+    static MEMO_READER_SHARD: usize =
+        NEXT_MEMO_READER_SHARD.fetch_add(1, Ordering::Relaxed) % MEMO_READER_SHARDS;
+}
+
+#[derive(Default)]
+struct MemoReaders {
+    shards: [AtomicUsize; MEMO_READER_SHARDS],
+}
+
+impl MemoReaders {
+    fn enter(&self) -> usize {
+        MEMO_READER_SHARD.with(|shard| {
+            self.shards[*shard].fetch_add(1, Ordering::SeqCst);
+            *shard
+        })
+    }
+
+    fn exit(&self, shard: usize) -> bool {
+        self.shards[shard].fetch_sub(1, Ordering::SeqCst) == 1
+    }
+
+    fn is_empty(&self) -> bool {
+        self.shards
+            .iter()
+            .all(|readers| readers.load(Ordering::SeqCst) == 0)
+    }
+}
 
 pub trait Configuration: Any {
     const DEBUG_NAME: &'static str;
@@ -200,6 +233,14 @@ pub struct IngredientImpl<C: Configuration> {
     /// we don't know that we can trust the database to give us the same runtime
     /// everytime and so forth.
     deleted_entries: DeletedEntries<C>,
+
+    /// Active fetches that may hold references to memo values, sharded by thread.
+    ///
+    /// Volatile eviction can retire a memo within a revision by atomically
+    /// replacing the table entry. The old memo allocation remains queued in
+    /// `deleted_entries`; this counter tells us when it is safe to drop the
+    /// retired value eagerly.
+    active_memo_readers: Option<Box<MemoReaders>>,
 }
 
 impl<C> IngredientImpl<C>
@@ -216,6 +257,8 @@ where
             memo_ingredient_indices,
             eviction: C::Eviction::new(eviction_capacity),
             deleted_entries: Default::default(),
+            active_memo_readers: C::Eviction::RETIRES_VALUES
+                .then(|| Box::new(MemoReaders::default())),
             view_caster: OnceLock::new(),
             sync_table: SyncTable::new(index),
         }
@@ -245,6 +288,34 @@ where
         C::Eviction: HasCapacity,
     {
         self.eviction.set_capacity(capacity);
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn memo_read_guard(&self) -> MemoReadGuard<'_, C> {
+        MemoReadGuard {
+            ingredient: self,
+            shard: self
+                .active_memo_readers
+                .as_deref()
+                .expect("only volatile queries acquire memo read guards")
+                .enter(),
+        }
+    }
+
+    #[inline]
+    fn try_drop_retired_values(&self) {
+        if self.deleted_entries.has_retired_values()
+            && self
+                .active_memo_readers
+                .as_deref()
+                .expect("only volatile queries retire memo values")
+                .is_empty()
+        {
+            // SAFETY: `active_memo_readers == 0` means no guarded volatile fetch
+            // can hold a reference to a retired memo value.
+            unsafe { self.deleted_entries.drop_retired_values() };
+        }
     }
 
     /// Returns a reference to the memo value that lives as long as self.
@@ -288,8 +359,19 @@ where
             // memo contents, and so it will be safe to free.
             unsafe { self.deleted_entries.push(old_value) };
         }
+
+        if self.eviction.record_insert(id) {
+            self.evict_values(zalsa);
+        }
+
         // SAFETY: memo has been inserted into the table
         unsafe { self.extend_memo_lifetime(memo.as_ref()) }
+    }
+
+    fn evict_values(&self, zalsa: &Zalsa) {
+        self.eviction
+            .for_each_evicted(|evict| self.evict_value_from_memo(zalsa, evict));
+        self.try_drop_retired_values();
     }
 
     #[inline]
@@ -301,6 +383,26 @@ where
         self.view_caster
             .get()
             .expect("tracked function ingredients cannot be accessed before calling `init`")
+    }
+}
+
+#[doc(hidden)]
+pub struct MemoReadGuard<'a, C: Configuration> {
+    ingredient: &'a IngredientImpl<C>,
+    shard: usize,
+}
+
+impl<C: Configuration> Drop for MemoReadGuard<'_, C> {
+    fn drop(&mut self) {
+        if self
+            .ingredient
+            .active_memo_readers
+            .as_deref()
+            .expect("only volatile queries acquire memo read guards")
+            .exit(self.shard)
+        {
+            self.ingredient.try_drop_retired_values();
+        }
     }
 }
 
@@ -534,7 +636,8 @@ where
             Self::evict_value_from_memo_for(
                 table.memos_mut(evict),
                 self.memo_ingredient_indices.get(ingredient_index),
-            )
+            );
+            true
         });
 
         self.deleted_entries.clear();

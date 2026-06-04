@@ -50,14 +50,14 @@ impl EvictionPolicy for Lru {
         }
     }
 
-    fn for_each_evicted(&mut self, mut cb: impl FnMut(Id)) {
+    fn for_each_evicted(&self, mut cb: impl FnMut(Id) -> bool) {
         let Some(cap) = self.capacity else {
             return;
         };
-        let set = self.set.get_mut();
+        let mut set = self.set.lock();
         while set.len() > cap.get() {
             if let Some(id) = set.pop_front() {
-                cb(id);
+                _ = cb(id);
             }
         }
     }

@@ -40,6 +40,27 @@ my_query::set_lru_capacity(db, 256);
 **Note:** The `set_lru_capacity` method is only generated for functions that have
 an `lru` attribute. Functions without LRU enabled do not have this method.
 
+### Within-Revision Collection
+
+For values that are cheap to recompute and useful only during a short burst of
+queries, use the `volatile` option:
+
+```rust
+#[salsa::tracked(volatile = 4096)]
+fn lower(db: &dyn Db, input: SourceFile) -> Arc<LoweredFile> {
+    // ...
+}
+```
+
+Unlike `lru`, volatile collection runs within a revision after the number of
+resident values crosses the configured watermark. It uses an approximate
+generation-based policy so frequently read values are retained without taking
+a global lock on every read.
+
+Volatile queries must return values using `returns(copy)` or `returns(clone)`
+(the default). Reference return modes such as `returns(ref)` are rejected
+because volatile values may be dropped before the next revision.
+
 ### Memory Management
 
 There is no garbage collection for keys and results of old queries, so LRU caches
