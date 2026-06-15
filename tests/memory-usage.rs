@@ -39,6 +39,11 @@ fn input_to_string_get_size(_db: &dyn salsa::Database) -> String {
     "a".repeat(1000)
 }
 
+#[salsa::tracked(volatile = 1, heap_size = string_size_of)]
+fn volatile_input_to_string(db: &dyn salsa::Database, input: MyInput) -> String {
+    input.field(db).clone()
+}
+
 #[salsa::tracked]
 fn input_to_length(db: &dyn salsa::Database, input: MyInput) -> usize {
     input.field(db).len()
@@ -215,4 +220,20 @@ fn cancellation_does_not_allocate_extra_for_ordinary_memos() {
     let after = &after.queries["input_to_length"];
     assert_eq!(after.count(), 2);
     assert_eq!(after.size_of_metadata(), before.size_of_metadata() * 2);
+}
+
+#[test]
+fn volatile_collected_values_report_only_metadata() {
+    let db = salsa::DatabaseImpl::new();
+
+    for _ in 0..1_024 {
+        let input = MyInput::new(&db, "a".to_owned());
+        assert_eq!(volatile_input_to_string(&db, input).len(), 1);
+    }
+
+    let memory_usage = <dyn salsa::Database>::memory_usage(&db);
+    let query = &memory_usage.queries["volatile_input_to_string"];
+    assert_eq!(query.count(), 1_024);
+    assert_eq!(query.size_of_fields(), std::mem::size_of::<String>());
+    assert_eq!(query.heap_size_of_fields(), Some(1));
 }

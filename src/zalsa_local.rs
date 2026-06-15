@@ -494,6 +494,17 @@ pub(crate) struct QueryRevisions {
 }
 
 impl QueryRevisions {
+    pub(crate) fn clone_for_eviction(&self) -> Option<Self> {
+        Some(Self {
+            changed_at: self.changed_at,
+            durability: self.durability,
+            origin_and_extra: self.origin_and_extra.clone_for_eviction()?,
+            #[cfg(feature = "accumulator")]
+            accumulated_inputs: self.accumulated_inputs.clone(),
+            verified_final: AtomicBool::new(self.verified_final.load(Ordering::Relaxed)),
+        })
+    }
+
     /// Returns the semantic origin of this query.
     #[inline]
     pub(crate) const fn origin(&self) -> QueryOriginRef<'_> {
@@ -554,6 +565,7 @@ impl QueryRevisionsExtra {
             None
         } else {
             tracked_struct_ids.shrink_to_fit();
+            let participated_in_cycle = !cycle_heads.is_empty();
 
             Some(QueryRevisionsExtraInner {
                 #[cfg(feature = "accumulator")]
@@ -562,6 +574,8 @@ impl QueryRevisionsExtra {
                 tracked_struct_ids,
                 iteration: iteration.into(),
                 cycle_converged: false,
+                participated_in_cycle,
+                poisoned: false,
             })
         };
 
@@ -615,9 +629,36 @@ struct QueryRevisionsExtraInner {
     /// This value is always `false` for other queries.
     #[cfg_attr(feature = "persistence", serde(skip))]
     cycle_converged: bool,
+
+    /// Whether this memo has ever participated in a cycle.
+    #[cfg_attr(feature = "persistence", serde(default))]
+    participated_in_cycle: bool,
+
+    /// True if the memo is a poison marker for a provisional cycle result
+    /// that panicked while computing.
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    poisoned: bool,
 }
 
 impl QueryRevisionsExtraInner {
+    fn clone_for_eviction(&self) -> Option<Self> {
+        #[cfg(feature = "accumulator")]
+        if !self.accumulated.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            #[cfg(feature = "accumulator")]
+            accumulated: AccumulatedMap::default(),
+            cycle_heads: self.cycle_heads.clone(),
+            tracked_struct_ids: self.tracked_struct_ids.clone(),
+            iteration: self.iteration.load().into(),
+            cycle_converged: self.cycle_converged,
+            participated_in_cycle: self.participated_in_cycle,
+            poisoned: self.poisoned,
+        })
+    }
+
     fn empty() -> Self {
         QueryRevisionsExtraInner {
             #[cfg(feature = "accumulator")]
@@ -626,6 +667,8 @@ impl QueryRevisionsExtraInner {
             cycle_heads: empty_cycle_heads().clone(),
             iteration: IterationStamp::default().into(),
             cycle_converged: false,
+            participated_in_cycle: false,
+            poisoned: false,
         }
     }
 
@@ -638,6 +681,8 @@ impl QueryRevisionsExtraInner {
             cycle_heads,
             iteration: _,
             cycle_converged: _,
+            participated_in_cycle: _,
+            poisoned: _,
         } = self;
 
         #[cfg(feature = "accumulator")]
@@ -670,7 +715,8 @@ impl fmt::Debug for QueryRevisionsExtraInner {
 
         f.field("cycle_heads", &self.cycle_heads)
             .field("iteration", &self.iteration)
-            .field("cycle_converged", &self.cycle_converged);
+            .field("cycle_converged", &self.cycle_converged)
+            .field("poisoned", &self.poisoned);
 
         #[cfg(feature = "accumulator")]
         {
@@ -737,8 +783,20 @@ impl QueryRevisions {
     /// Sets the `CycleHeads` for this query.
     pub(crate) fn set_cycle_heads(&mut self, cycle_heads: CycleHeads, iteration: IterationStamp) {
         let extra = self.origin_and_extra.get_or_insert_extra();
+        extra.participated_in_cycle |= !cycle_heads.is_empty();
         extra.cycle_heads = cycle_heads;
         extra.iteration = iteration.into();
+    }
+
+    pub(crate) fn participated_in_cycle(&self) -> bool {
+        self.extra()
+            .is_some_and(|extra| extra.participated_in_cycle)
+    }
+
+    pub(crate) fn mark_participated_in_cycle(&mut self) {
+        self.origin_and_extra
+            .get_or_insert_extra()
+            .participated_in_cycle = true;
     }
 
     pub(crate) const fn cycle_converged(&self) -> bool {
@@ -752,6 +810,14 @@ impl QueryRevisions {
         if let Some(extra) = self.origin_and_extra.extra_mut() {
             extra.cycle_converged = cycle_converged
         }
+    }
+
+    pub(crate) fn poisoned(&self) -> bool {
+        self.extra().is_some_and(|extra| extra.poisoned)
+    }
+
+    pub(crate) fn set_poisoned(&mut self) {
+        self.origin_and_extra.get_or_insert_extra().poisoned = true;
     }
 
     pub(crate) fn iteration(&self) -> IterationStamp {
@@ -974,6 +1040,22 @@ where
 }
 
 impl OriginAndExtra {
+    fn clone_for_eviction(&self) -> Option<Self> {
+        let extra = match self.extra() {
+            Some(extra) => QueryRevisionsExtra(Some(extra.clone_for_eviction()?)),
+            None => QueryRevisionsExtra(None),
+        };
+
+        Some(match self.origin() {
+            QueryOriginRef::Assigned(key) => match extra.0 {
+                Some(extra) => Self::assigned_with_extra(key, extra),
+                None => Self::assigned(key),
+            },
+            QueryOriginRef::Derived(edges) => Self::derived(edges.iter(), extra),
+            QueryOriginRef::DerivedUntracked(edges) => Self::derived_untracked(edges.iter(), extra),
+        })
+    }
+
     #[inline]
     pub(crate) fn derived<I>(input_outputs: I, extra: QueryRevisionsExtra) -> Self
     where
