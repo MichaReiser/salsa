@@ -110,7 +110,7 @@ pub trait Database: Send + ZalsaDatabase + AsDynDatabase {
     /// used instead.
     fn unwind_if_revision_cancelled(&self) {
         let (zalsa, zalsa_local) = self.zalsas();
-        zalsa.unwind_if_revision_cancelled(zalsa_local);
+        zalsa.unwind_if_revision_cancelled(self, zalsa_local);
     }
 
     /// Execute `op` with the database in thread-local storage for debug print-outs.

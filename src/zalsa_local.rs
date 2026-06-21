@@ -300,16 +300,20 @@ impl ZalsaLocal {
 
     /// Register that currently active query reads the given input
     #[inline(always)]
-    pub(crate) fn report_tracked_read(
+    pub(crate) fn report_tracked_read<Db>(
         &self,
+        db: &Db,
         input: DatabaseKeyIndex,
         durability: Durability,
         changed_at: Revision,
         cycle_heads: &CycleHeads,
         #[cfg(feature = "accumulator")] has_accumulated: bool,
         #[cfg(feature = "accumulator")] accumulated_inputs: &AtomicInputAccumulatedValues,
-    ) {
-        crate::tracing::debug!(
+    ) where
+        Db: ?Sized + crate::Database,
+    {
+        crate::tracing::debug_with_db!(
+            db,
             "report_tracked_read(input={:?}, durability={:?}, changed_at={:?})",
             input,
             durability,
@@ -350,6 +354,37 @@ impl ZalsaLocal {
             changed_at
         );
 
+        self.report_tracked_read_simple_impl(input, durability, changed_at);
+    }
+
+    #[inline(always)]
+    pub(crate) fn report_tracked_read_simple_with_db<Db>(
+        &self,
+        db: &Db,
+        input: DatabaseKeyIndex,
+        durability: Durability,
+        changed_at: Revision,
+    ) where
+        Db: ?Sized + crate::Database,
+    {
+        crate::tracing::debug_with_db!(
+            db,
+            "report_tracked_read(input={:?}, durability={:?}, changed_at={:?})",
+            input,
+            durability,
+            changed_at
+        );
+
+        self.report_tracked_read_simple_impl(input, durability, changed_at);
+    }
+
+    #[inline(always)]
+    fn report_tracked_read_simple_impl(
+        &self,
+        input: DatabaseKeyIndex,
+        durability: Durability,
+        changed_at: Revision,
+    ) {
         // SAFETY: We do not access the query stack reentrantly.
         unsafe {
             self.with_query_stack_unchecked_mut(|stack| {

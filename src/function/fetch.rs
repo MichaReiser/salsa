@@ -19,12 +19,17 @@ where
         zalsa_local: &'db ZalsaLocal,
         id: Id,
     ) -> &'db C::Output<'db> {
-        zalsa.unwind_if_revision_cancelled(zalsa_local);
+        zalsa.unwind_if_revision_cancelled(db, zalsa_local);
 
         let database_key_index = self.database_key_index(id);
 
         #[cfg(debug_assertions)]
-        let _span = crate::tracing::debug_span!("fetch", query = ?database_key_index).entered();
+        let _span = crate::tracing::debug_span_with_db!(
+            db,
+            "fetch",
+            query = ?database_key_index
+        )
+        .entered();
 
         let memo = self.refresh_memo(db, zalsa, zalsa_local, id);
 
@@ -34,6 +39,7 @@ where
         self.eviction.record_use(id);
 
         zalsa_local.report_tracked_read(
+            db,
             database_key_index,
             memo.revisions.durability,
             memo.revisions.changed_at,
@@ -59,8 +65,12 @@ where
 
         loop {
             if let Some(memo) = self
-                .fetch_hot(zalsa, id, memo_ingredient_index)
-                .or_else(|| self.fetch_cold(zalsa, zalsa_local, db, id, memo_ingredient_index))
+                .fetch_hot(db, zalsa, id, memo_ingredient_index)
+                .or_else(|| {
+                    crate::attach::attach_if_needed(db, || {
+                        self.fetch_cold(zalsa, zalsa_local, db, id, memo_ingredient_index)
+                    })
+                })
             {
                 return memo;
             }
@@ -70,6 +80,7 @@ where
     #[inline(always)]
     fn fetch_hot<'db>(
         &'db self,
+        db: &'db C::DbView,
         zalsa: &'db Zalsa,
         id: Id,
         memo_ingredient_index: MemoIngredientIndex,
@@ -80,10 +91,10 @@ where
 
         let database_key_index = self.database_key_index(id);
 
-        let can_shallow_update = self.shallow_verify_memo(zalsa, database_key_index, memo);
+        let can_shallow_update = self.shallow_verify_memo(db, zalsa, database_key_index, memo);
 
         if can_shallow_update.yes() && !memo.may_be_provisional() {
-            self.update_shallow(zalsa, database_key_index, memo, can_shallow_update);
+            self.update_shallow(db, zalsa, database_key_index, memo, can_shallow_update);
 
             // SAFETY: memo is present in memo_map and we have verified that it is
             // still valid for the current revision.
@@ -130,7 +141,7 @@ where
         if let Some(old_memo) = opt_old_memo {
             if old_memo.value.is_some() {
                 let can_shallow_update =
-                    self.shallow_verify_memo(zalsa, database_key_index, old_memo);
+                    self.shallow_verify_memo(db, zalsa, database_key_index, old_memo);
                 if can_shallow_update.yes()
                     && self.validate_may_be_provisional(
                         zalsa,
@@ -139,7 +150,13 @@ where
                         old_memo,
                     )
                 {
-                    self.update_shallow(zalsa, database_key_index, old_memo, can_shallow_update);
+                    self.update_shallow(
+                        db,
+                        zalsa,
+                        database_key_index,
+                        old_memo,
+                        can_shallow_update,
+                    );
 
                     // SAFETY: memo is present in memo_map and we have verified that it is
                     // still valid for the current revision.

@@ -35,6 +35,23 @@ impl Attached {
     }
 
     #[inline]
+    fn is_current_database<Db>(&self, db: &Db) -> bool
+    where
+        Db: ?Sized + Database,
+    {
+        let Some(current_db) = self.database.get() else {
+            return false;
+        };
+
+        let new_db = NonNull::from(db.as_dyn_database());
+        if !std::ptr::addr_eq(current_db.as_ptr(), new_db.as_ptr()) {
+            panic!("Cannot change database mid-query. current: {current_db:?}, new: {new_db:?}");
+        }
+
+        true
+    }
+
+    #[inline]
     fn attach<Db, R>(&self, db: &Db, op: impl FnOnce() -> R) -> R
     where
         Db: ?Sized + Database,
@@ -49,23 +66,12 @@ impl Attached {
         impl<'s> DbGuard<'s> {
             #[inline]
             fn new(attached: &'s Attached, db: &dyn Database) -> Self {
-                match attached.database.get() {
-                    // A database is already attached, make sure it's the same as the new one.
-                    Some(current_db) => {
-                        let new_db = NonNull::from(db);
-                        if !std::ptr::addr_eq(current_db.as_ptr(), new_db.as_ptr()) {
-                            panic!(
-                                "Cannot change database mid-query. current: {current_db:?}, new: {new_db:?}"
-                            );
-                        }
-                        Self { state: None }
-                    }
-                    // No database is attached, attach the new one.
-                    None => {
-                        attached.database.set(Some(NonNull::from(db)));
-                        Self {
-                            state: Some(attached),
-                        }
+                if attached.is_current_database(db) {
+                    Self { state: None }
+                } else {
+                    attached.database.set(Some(NonNull::from(db)));
+                    Self {
+                        state: Some(attached),
                     }
                 }
             }
@@ -176,6 +182,60 @@ where
     ATTACHED.with(
         #[inline]
         |a| a.attach(db, op),
+    )
+}
+
+/// Panics if a database other than `db` is currently attached.
+#[doc(hidden)]
+#[inline]
+pub fn assert_current_database<Db>(db: &Db)
+where
+    Db: ?Sized + Database,
+{
+    ATTACHED.with(
+        #[inline]
+        |attached| {
+            attached.is_current_database(db);
+        },
+    )
+}
+
+#[inline]
+pub(crate) fn attach_if_needed<R, Db>(db: &Db, op: impl FnOnce() -> R) -> R
+where
+    Db: ?Sized + Database,
+{
+    ATTACHED.with(
+        #[inline]
+        |attached| {
+            if attached.is_current_database(db) {
+                op()
+            } else {
+                attach_cold(attached, db, op)
+            }
+        },
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn attach_cold<R, Db>(attached: &Attached, db: &Db, op: impl FnOnce() -> R) -> R
+where
+    Db: ?Sized + Database,
+{
+    attached.attach(db, op)
+}
+
+#[inline]
+pub(crate) fn is_attached(zalsa_local: &crate::zalsa_local::ZalsaLocal) -> bool {
+    ATTACHED.with(
+        #[inline]
+        |a| {
+            a.database.get().is_some_and(|db| {
+                // SAFETY: Attached database pointers remain valid until their guard is dropped.
+                std::ptr::eq(unsafe { db.as_ref() }.zalsa_local(), zalsa_local)
+            })
+        },
     )
 }
 

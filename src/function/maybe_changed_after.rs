@@ -92,12 +92,14 @@ where
     ) -> VerifyResult {
         let (zalsa, zalsa_local) = db.zalsas();
         let memo_ingredient_index = self.memo_ingredient_index(zalsa, id);
-        zalsa.unwind_if_revision_cancelled(zalsa_local);
+        crate::attach::assert_current_database(db);
+        zalsa.unwind_if_revision_cancelled(db, zalsa_local);
 
         loop {
             let database_key_index = self.database_key_index(id);
 
-            crate::tracing::debug!(
+            crate::tracing::debug_with_db!(
+                db,
                 "{database_key_index:?}: maybe_changed_after(revision = {revision:?})"
             );
 
@@ -108,9 +110,9 @@ where
                 return VerifyResult::changed();
             };
 
-            let can_shallow_update = self.shallow_verify_memo(zalsa, database_key_index, memo);
+            let can_shallow_update = self.shallow_verify_memo(db, zalsa, database_key_index, memo);
             if can_shallow_update.yes() && !memo.may_be_provisional() {
-                self.update_shallow(zalsa, database_key_index, memo, can_shallow_update);
+                self.update_shallow(db, zalsa, database_key_index, memo, can_shallow_update);
 
                 return if memo.revisions.changed_at > revision {
                     VerifyResult::changed()
@@ -119,14 +121,16 @@ where
                 };
             }
 
-            if let Some(mcs) = self.maybe_changed_after_cold(
-                zalsa,
-                zalsa_local,
-                db,
-                id,
-                revision,
-                memo_ingredient_index,
-            ) {
+            if let Some(mcs) = crate::attach::attach_if_needed(db, || {
+                self.maybe_changed_after_cold(
+                    zalsa,
+                    zalsa_local,
+                    db,
+                    id,
+                    revision,
+                    memo_ingredient_index,
+                )
+            }) {
                 return mcs;
             } else {
                 // We failed to claim, have to retry.
@@ -176,11 +180,11 @@ where
             old_memo = old_memo.tracing_debug()
         );
 
-        let can_shallow_update = self.shallow_verify_memo(zalsa, database_key_index, old_memo);
+        let can_shallow_update = self.shallow_verify_memo(db, zalsa, database_key_index, old_memo);
         if can_shallow_update.yes()
             && self.validate_may_be_provisional(zalsa, zalsa_local, database_key_index, old_memo)
         {
-            self.update_shallow(zalsa, database_key_index, old_memo, can_shallow_update);
+            self.update_shallow(db, zalsa, database_key_index, old_memo, can_shallow_update);
 
             return Some(if old_memo.revisions.changed_at > revision {
                 VerifyResult::changed()
@@ -233,11 +237,13 @@ where
     #[inline]
     pub(super) fn shallow_verify_memo(
         &self,
+        db: &C::DbView,
         zalsa: &Zalsa,
         database_key_index: DatabaseKeyIndex,
         memo: &Memo<'_, C>,
     ) -> ShallowUpdate {
-        crate::tracing::debug!(
+        crate::tracing::debug_with_db!(
+            db,
             "{database_key_index:?}: shallow_verify_memo(memo = {memo:#?})",
             memo = memo.tracing_debug()
         );
@@ -250,7 +256,8 @@ where
         }
 
         let last_changed = zalsa.last_changed_revision(memo.revisions.durability);
-        crate::tracing::trace!(
+        crate::tracing::trace_with_db!(
+            db,
             "{database_key_index:?}: check_durability({database_key_index:#?}, last_changed={:?} <= verified_at={:?}) = {:?}",
             last_changed,
             verified_at,
@@ -267,14 +274,17 @@ where
     #[inline]
     pub(super) fn update_shallow(
         &self,
+        db: &C::DbView,
         zalsa: &Zalsa,
         database_key_index: DatabaseKeyIndex,
         memo: &Memo<'_, C>,
         update: ShallowUpdate,
     ) {
         if let ShallowUpdate::HigherDurability = update {
-            memo.mark_as_verified(zalsa, database_key_index);
-            memo.mark_outputs_as_verified(zalsa, database_key_index);
+            crate::attach::attach_if_needed(db, || {
+                memo.mark_as_verified(zalsa, database_key_index);
+                memo.mark_outputs_as_verified(zalsa, database_key_index);
+            });
         }
     }
 
