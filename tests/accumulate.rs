@@ -8,8 +8,8 @@ use test_log::test;
 
 #[salsa::input(debug)]
 struct MyInput {
-    field_a: u32,
-    field_b: u32,
+    field_a: salsa::InputField<u32>,
+    field_b: salsa::InputField<u32>,
 }
 
 #[salsa::accumulator]

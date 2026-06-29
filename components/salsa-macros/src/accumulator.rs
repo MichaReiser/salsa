@@ -35,7 +35,11 @@ impl AllowedOptions for Accumulator {
     const DEBUG: bool = false;
     const NON_UPDATE_TYPES: bool = false;
     const NO_LIFETIME: bool = false;
+
+    const BARE: bool = false;
     const SINGLETON: bool = false;
+    const FIELDS: bool = false;
+
     const DATA: bool = false;
     const DB: bool = false;
     const CYCLE_FN: bool = false;

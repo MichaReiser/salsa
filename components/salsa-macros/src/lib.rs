@@ -33,6 +33,7 @@ macro_rules! parse_macro_input {
 }
 
 mod accumulator;
+mod data;
 mod db;
 mod db_lifetime;
 mod debug;
@@ -42,6 +43,7 @@ mod input;
 mod interned;
 mod options;
 mod salsa_struct;
+mod struct_id;
 mod supertype;
 mod tracked;
 mod tracked_fn;
@@ -75,9 +77,48 @@ pub fn input(args: TokenStream, input: TokenStream) -> TokenStream {
     input::input(args, input)
 }
 
+/// Declares data stored behind a generic `salsa::Interned` handle.
+#[proc_macro_derive(InternedData)]
+pub fn derive_interned(input: TokenStream) -> TokenStream {
+    derive_data(input, data::DataKind::Interned)
+}
+
+/// Declares data stored behind a generic `salsa::Tracked` handle.
+#[proc_macro_derive(TrackedData, attributes(salsa))]
+pub fn derive_tracked(input: TokenStream) -> TokenStream {
+    derive_data(input, data::DataKind::Tracked)
+}
+
+/// Declares data stored behind a generic `salsa::Input` handle.
+#[proc_macro_derive(InputData)]
+pub fn derive_input(input: TokenStream) -> TokenStream {
+    derive_data(input, data::DataKind::Input)
+}
+
+/// Implements `salsa::Struct` for a one-field Salsa struct newtype.
+///
+/// This derive intentionally generates no inherent methods or ordinary trait
+/// implementations. The wrapper controls its own constructors and public API.
+#[proc_macro_derive(Struct, attributes(salsa))]
+pub fn derive_struct_id(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    match struct_id::derive(input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
 #[proc_macro_attribute]
 pub fn tracked(args: TokenStream, input: TokenStream) -> TokenStream {
     tracked::tracked(args, input)
+}
+
+fn derive_data(input: TokenStream, kind: data::DataKind) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    match data::derive(kind, input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
 }
 
 /// Derives `salsa::Update` for a struct or enum.

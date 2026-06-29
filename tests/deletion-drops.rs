@@ -18,9 +18,8 @@ struct MyInput {
 struct MyTracked<'db> {
     identifier: u32,
 
-    #[tracked]
     #[returns(ref)]
-    field: Bomb,
+    field: salsa::TrackedField<Bomb>,
 }
 
 thread_local! {

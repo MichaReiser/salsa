@@ -43,11 +43,15 @@ impl AllowedOptions for InputStruct {
 
     const NO_LIFETIME: bool = false;
 
+    const BARE: bool = true;
+
     const NON_UPDATE_TYPES: bool = false;
 
     const SINGLETON: bool = true;
 
-    const DATA: bool = true;
+    const FIELDS: bool = true;
+
+    const DATA: bool = false;
 
     const DB: bool = false;
 
@@ -98,9 +102,13 @@ impl Macro {
         let salsa_struct = SalsaStruct::new(&self.struct_item, &self.args)?;
 
         let attrs = &self.struct_item.attrs;
+        let fields_heap_size_attrs = crate::salsa_struct::fields_heap_size_attrs(attrs);
         let vis = &self.struct_item.vis;
         let struct_ident = &self.struct_item.ident;
+        let fields_ident = salsa_struct.fields_ident(&self.hygiene);
+        let fields_attrs = salsa_struct.fields_attrs();
         let new_fn = salsa_struct.constructor_name();
+        let fields_fn = salsa_struct.fields_method_name();
         let field_ids = salsa_struct.field_ids();
         let field_indices = salsa_struct.field_indices();
         let num_fields = salsa_struct.num_fields();
@@ -110,16 +118,46 @@ impl Macro {
         let required_fields = salsa_struct.required_fields();
         let field_options = salsa_struct.field_options();
         let field_tys = salsa_struct.field_tys();
+        let field_value_tys = field_tys
+            .iter()
+            .map(|ty| {
+                let ty = crate::salsa_struct::wrapper_inner_type(ty, "InputField").unwrap_or(ty);
+                quote!(#ty)
+            })
+            .collect::<Vec<_>>();
+        let field_kinds = salsa_struct
+            .input_flags()
+            .into_iter()
+            .map(|input| {
+                syn::Ident::new(
+                    if input { "input" } else { "plain" },
+                    proc_macro2::Span::call_site(),
+                )
+            })
+            .collect::<Vec<_>>();
         let field_durability_ids = salsa_struct.field_durability_ids();
         let field_attrs = salsa_struct.field_attrs();
+        let storage_field_attrs = salsa_struct.storage_field_attrs();
         let is_singleton = self.args.singleton.is_some();
         let generate_debug_impl = salsa_struct.generate_debug_impl();
+        let generate_methods = self.args.bare.is_none();
         let heap_size_fn = self.args.heap_size_fn.iter();
 
         let persist = self.args.persist();
         let serialize_fn = salsa_struct.serialize_fn();
         let deserialize_fn = salsa_struct.deserialize_fn();
-
+        let (fields_serialize, fields_deserialize) = salsa_struct.fields_serde_impls(
+            quote!(),
+            quote!(<'de>),
+            quote!(#fields_ident),
+            field_tys.iter().copied(),
+            None,
+        );
+        let fields_debug = salsa_struct.fields_debug_impl(
+            quote!(),
+            quote!(#fields_ident),
+            field_tys.iter().copied(),
+        );
         let zalsa = self.hygiene.ident("zalsa");
         let zalsa_struct = self.hygiene.ident("zalsa_struct");
         let Configuration = self.hygiene.ident("Configuration");
@@ -130,16 +168,34 @@ impl Macro {
         Ok(crate::debug::dump_tokens(
             struct_ident,
             quote! {
+                #fields_attrs
+                #(#fields_heap_size_attrs)*
+                #[derive(salsa::InputData)]
+                #vis struct #fields_ident {
+                    #(
+                        #(#storage_field_attrs)*
+                        #field_vis #field_ids: #field_tys,
+                    )*
+                }
+
+                #fields_debug
+                #fields_serialize
+                #fields_deserialize
+
                 salsa::plumbing::setup_input_struct!(
                     attrs: [#(#attrs),*],
                     vis: #vis,
                     Struct: #struct_ident,
+                    Fields: #fields_ident,
+                    fields_fn: #fields_fn,
                     new_fn: #new_fn,
                     field_options: [#(#field_options),*],
                     field_ids: [#(#field_ids),*],
                     field_getters: [#(#field_vis #field_getter_ids),*],
                     field_setters: [#(#field_vis #field_setter_ids),*],
                     field_tys: [#(#field_tys),*],
+                    field_value_tys: [#(#field_value_tys),*],
+                    field_kinds: [#(#field_kinds),*],
                     field_indices: [#(#field_indices),*],
                     field_attrs: [#([#(#field_attrs),*]),*],
                     required_fields: [#(#required_fields),*],
@@ -147,6 +203,7 @@ impl Macro {
                     num_fields: #num_fields,
                     is_singleton: #is_singleton,
                     generate_debug_impl: #generate_debug_impl,
+                    generate_methods: #generate_methods,
                     heap_size_fn: #(#heap_size_fn)*,
                     persist: #persist,
                     serialize_fn: #(#serialize_fn)*,

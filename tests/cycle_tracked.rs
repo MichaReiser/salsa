@@ -33,8 +33,7 @@ struct Node<'db> {
     name: String,
 
     #[returns(deref)]
-    #[tracked]
-    edges: Vec<Edge>,
+    edges: salsa::TrackedField<Vec<Edge>>,
 
     graph: GraphInput,
 }
@@ -303,8 +302,7 @@ fn test_cycle_with_fixpoint_structs() {
 struct NameWithOffset<'db> {
     name: String,
 
-    #[tracked]
-    offset: u32,
+    offset: salsa::TrackedField<u32>,
 }
 
 #[test]

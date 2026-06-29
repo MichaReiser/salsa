@@ -12,8 +12,7 @@ struct MyInput {
 
 #[salsa::tracked]
 struct MyTracked<'db> {
-    #[tracked]
-    field: MyInterned<'db>,
+    field: salsa::TrackedField<MyInterned<'db>>,
 }
 
 #[salsa::interned]

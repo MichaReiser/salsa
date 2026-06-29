@@ -13,10 +13,8 @@ struct MyInput {
 
 #[salsa::tracked(debug)]
 struct MyTracked<'db> {
-    #[tracked]
-    data: MyInput,
-    #[tracked]
-    next: MyList<'db>,
+    data: salsa::TrackedField<MyInput>,
+    next: salsa::TrackedField<MyList<'db>>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, Update)]
@@ -38,23 +36,31 @@ fn execute() {
         let t0: MyTracked = create_tracked_list(db, input);
         let t1 = create_tracked_list(db, input);
         expect_test::expect![[r#"
-            MyTracked {
-                [salsa id]: Id(401),
-                data: MyInput {
-                    [salsa id]: Id(0),
-                    field: "foo",
-                },
-                next: Next(
-                    MyTracked {
-                        [salsa id]: Id(400),
-                        data: MyInput {
-                            [salsa id]: Id(0),
+            Tracked(
+                Id(401),
+                MyTracked {
+                    data: Input(
+                        Id(0),
+                        MyInput {
                             field: "foo",
                         },
-                        next: None,
-                    },
-                ),
-            }
+                    ),
+                    next: Next(
+                        Tracked(
+                            Id(400),
+                            MyTracked {
+                                data: Input(
+                                    Id(0),
+                                    MyInput {
+                                        field: "foo",
+                                    },
+                                ),
+                                next: None,
+                            },
+                        ),
+                    ),
+                },
+            )
         "#]]
         .assert_debug_eq(&t0);
         assert_eq!(t0, t1);

@@ -7,10 +7,10 @@ use test_log::test;
 
 #[salsa::input]
 struct MyInput {
-    required_field: bool,
+    required_field: salsa::InputField<bool>,
 
     #[default]
-    optional_field: usize,
+    optional_field: salsa::InputField<usize>,
 }
 
 #[test]

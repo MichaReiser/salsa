@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use proc_macro2::{Literal, Span, TokenStream};
-use syn::{Token, parenthesized, parse::ParseStream, spanned::Spanned, visit::Visit};
+use syn::{GenericParam, Token, parenthesized, parse::ParseStream, spanned::Spanned, visit::Visit};
 use synstructure::BindStyle;
 
 use crate::{hygiene::Hygiene, kw};
@@ -158,6 +158,13 @@ pub(crate) fn update_derive(input: syn::DeriveInput) -> syn::Result<TokenStream>
 
     let ident = &input.ident;
     let used_type_params = used_type_params.used;
+    let family_lifetime_ident = hygiene.ident("db");
+    let family_lifetime = syn::Lifetime::new(
+        &format!("'{family_lifetime_ident}"),
+        family_lifetime_ident.span(),
+    );
+    let (erased_type, rebound_type) =
+        lifetime_family_types(&input, &used_type_params, &family_lifetime);
     let generics = input.generics;
     let generics = add_trait_bounds(generics, &used_type_params, additional_bounds);
 
@@ -166,6 +173,9 @@ pub(crate) fn update_derive(input: syn::DeriveInput) -> syn::Result<TokenStream>
         #[allow(clippy::all)]
         #[automatically_derived]
         unsafe impl #impl_generics salsa::Update for #ident #ty_generics #where_clause {
+            type Erased = #erased_type;
+            type Rebind<#family_lifetime> = #rebound_type;
+
             unsafe fn maybe_update(#old_pointer: *mut Self, #new_value: Self) -> bool {
                 use ::salsa::plumbing::UpdateFallback as _;
                 let #old_pointer = unsafe { &mut *#old_pointer };
@@ -177,6 +187,53 @@ pub(crate) fn update_derive(input: syn::DeriveInput) -> syn::Result<TokenStream>
     };
 
     Ok(crate::debug::dump_tokens(&input.ident, tokens))
+}
+
+fn lifetime_family_types(
+    input: &syn::DeriveInput,
+    used_type_params: &HashSet<String>,
+    family_lifetime: &syn::Lifetime,
+) -> (TokenStream, TokenStream) {
+    let ident = &input.ident;
+    let erased_arguments = input.generics.params.iter().map(|param| match param {
+        GenericParam::Lifetime(_) => quote!('static),
+        GenericParam::Type(param) if used_type_params.contains(&param.ident.to_string()) => {
+            let ident = &param.ident;
+            quote!(<#ident as ::salsa::Update>::Erased)
+        }
+        GenericParam::Type(param) => {
+            let ident = &param.ident;
+            quote!(#ident)
+        }
+        GenericParam::Const(param) => {
+            let ident = &param.ident;
+            quote!(#ident)
+        }
+    });
+    let rebound_arguments = input.generics.params.iter().map(|param| match param {
+        GenericParam::Lifetime(_) => quote!(#family_lifetime),
+        GenericParam::Type(param) if used_type_params.contains(&param.ident.to_string()) => {
+            let ident = &param.ident;
+            quote!(<#ident as ::salsa::Update>::Rebind<#family_lifetime>)
+        }
+        GenericParam::Type(param) => {
+            let ident = &param.ident;
+            quote!(#ident)
+        }
+        GenericParam::Const(param) => {
+            let ident = &param.ident;
+            quote!(#ident)
+        }
+    });
+
+    if input.generics.params.is_empty() {
+        (quote!(#ident), quote!(#ident))
+    } else {
+        (
+            quote!(#ident<#(#erased_arguments),*>),
+            quote!(#ident<#(#rebound_arguments),*>),
+        )
+    }
 }
 
 fn add_trait_bounds(
@@ -191,6 +248,8 @@ fn add_trait_bounds(
 
         if used_type_params.contains(&type_param.ident.to_string()) {
             type_param.bounds.push(syn::parse_quote!(::salsa::Update));
+        } else {
+            type_param.bounds.push(syn::parse_quote!('static));
         }
     }
 

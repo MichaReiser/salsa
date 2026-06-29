@@ -33,6 +33,9 @@ pub(crate) struct Options<A: AllowedOptions> {
     /// If this is `Some`, the value is the `no_lifetime` identifier.
     pub no_lifetime: Option<syn::Ident>,
 
+    /// Suppress inherent convenience methods while retaining Salsa wiring.
+    pub bare: Option<syn::Ident>,
+
     /// The `singleton` option is used on input with only one field
     /// It allows the creation of convenient methods
     pub singleton: Option<syn::Ident>,
@@ -77,11 +80,10 @@ pub(crate) struct Options<A: AllowedOptions> {
     /// If this is `Some`, the value is the `<path>`.
     pub cycle_result: Option<syn::Expr>,
 
-    /// The `data = <ident>` option is used to define the name of the data type for an interned
-    /// struct.
+    /// The `fields = <ident>` option exposes the generated fields type under the given name.
     ///
     /// If this is `Some`, the value is the `<ident>`.
-    pub data: Option<syn::Ident>,
+    pub fields: Option<syn::Ident>,
 
     /// The `lru = <usize>` option is used to set the lru capacity for a tracked function.
     ///
@@ -144,11 +146,12 @@ impl<A: AllowedOptions> Default for Options<A> {
             no_eq: Default::default(),
             debug: Default::default(),
             no_lifetime: Default::default(),
+            bare: Default::default(),
             db_path: Default::default(),
             cycle_fn: Default::default(),
             cycle_initial: Default::default(),
             cycle_result: Default::default(),
-            data: Default::default(),
+            fields: Default::default(),
             constructor_name: Default::default(),
             phantom: Default::default(),
             lru: Default::default(),
@@ -169,8 +172,11 @@ pub(crate) trait AllowedOptions {
     const NO_EQ: bool;
     const DEBUG: bool;
     const NO_LIFETIME: bool;
+    const BARE: bool;
     const NON_UPDATE_TYPES: bool;
     const SINGLETON: bool;
+    const FIELDS: bool;
+    /// Accept the former `data = Name` spelling as an alias for `fields`.
     const DATA: bool;
     const DB: bool;
     const CYCLE_FN: bool;
@@ -261,6 +267,17 @@ impl<A: AllowedOptions> syn::parse::Parse for Options<A> {
                     return Err(syn::Error::new(
                         ident.span(),
                         "`no_lifetime` option not allowed here",
+                    ));
+                }
+            } else if ident == "bare" {
+                if A::BARE {
+                    if let Some(old) = options.bare.replace(ident) {
+                        return Err(syn::Error::new(old.span(), "option `bare` provided twice"));
+                    }
+                } else {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "`bare` option not allowed here",
                     ));
                 }
             } else if ident == "unsafe" {
@@ -432,17 +449,25 @@ impl<A: AllowedOptions> syn::parse::Parse for Options<A> {
                         "`cycle_result` option not allowed here",
                     ));
                 }
-            } else if ident == "data" {
-                if A::DATA {
+            } else if ident == "fields" || ident == "data" {
+                let allowed = if ident == "fields" {
+                    A::FIELDS
+                } else {
+                    A::DATA
+                };
+                if allowed {
                     let _eq = Equals::parse(input)?;
-                    let ident = syn::Ident::parse(input)?;
-                    if let Some(old) = options.data.replace(ident) {
-                        return Err(syn::Error::new(old.span(), "option `data` provided twice"));
+                    let value = syn::Ident::parse(input)?;
+                    if let Some(old) = options.fields.replace(value) {
+                        return Err(syn::Error::new(
+                            old.span(),
+                            "the fields type name was provided twice",
+                        ));
                     }
                 } else {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "`data` option not allowed here",
+                        format!("`{ident}` option not allowed here"),
                     ));
                 }
             } else if ident == "lru" {
@@ -558,6 +583,7 @@ impl<A: AllowedOptions> quote::ToTokens for Options<A> {
             no_eq,
             debug,
             no_lifetime,
+            bare,
             singleton,
             specify,
             non_update_types,
@@ -565,7 +591,7 @@ impl<A: AllowedOptions> quote::ToTokens for Options<A> {
             cycle_fn,
             cycle_initial,
             cycle_result,
-            data,
+            fields,
             lru,
             constructor_name,
             id,
@@ -586,6 +612,9 @@ impl<A: AllowedOptions> quote::ToTokens for Options<A> {
         }
         if no_lifetime.is_some() {
             tokens.extend(quote::quote! { no_lifetime, });
+        }
+        if bare.is_some() {
+            tokens.extend(quote::quote! { bare, });
         }
         if singleton.is_some() {
             tokens.extend(quote::quote! { singleton, });
@@ -608,8 +637,8 @@ impl<A: AllowedOptions> quote::ToTokens for Options<A> {
         if let Some(cycle_result) = cycle_result {
             tokens.extend(quote::quote! { cycle_result = #cycle_result, });
         }
-        if let Some(data) = data {
-            tokens.extend(quote::quote! { data = #data, });
+        if let Some(fields) = fields {
+            tokens.extend(quote::quote! { fields = #fields, });
         }
         if let Some(lru) = lru {
             tokens.extend(quote::quote! { lru = #lru, });

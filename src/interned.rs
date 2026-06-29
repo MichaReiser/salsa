@@ -41,6 +41,20 @@ pub trait Configuration: Sized + 'static {
     const LOCATION: crate::ingredient::Location;
     const DEBUG_NAME: &'static str;
 
+    fn debug_name() -> &'static str {
+        Self::DEBUG_NAME
+    }
+
+    /// Returns this configuration's interned ingredient.
+    ///
+    /// Generated configurations override this method with their per-type
+    /// cache. The default supports manually configured structs without adding
+    /// another adapter trait around `Configuration`.
+    fn ingredient(zalsa: &Zalsa) -> &IngredientImpl<Self> {
+        let index = zalsa.lookup_jar_by_type::<JarImpl<Self>>();
+        zalsa.lookup_ingredient(index).assert_type()
+    }
+
     /// Whether this struct should be persisted with the database.
     const PERSIST: bool;
 
@@ -48,7 +62,7 @@ pub trait Configuration: Sized + 'static {
     const REVISIONS: NonZeroUsize = NonZeroUsize::new(DEFAULT_REVISIONS).unwrap();
 
     /// The fields of the struct being interned.
-    type Fields<'db>: InternedData;
+    type Fields<'db>: InternedValue;
 
     /// The end user struct
     type Struct<'db>: Copy + FromId + AsId;
@@ -73,8 +87,12 @@ pub trait Configuration: Sized + 'static {
         D: plumbing::serde::Deserializer<'de>;
 }
 
-pub trait InternedData: Sized + Eq + Hash + Clone + Sync + Send {}
-impl<T: Eq + Hash + Clone + Sync + Send> InternedData for T {}
+/// Value requirements for data stored in an interned ingredient.
+///
+/// This blanket trait is distinct from [`crate::InternedData`], which declares
+/// a data type's generic interned configuration.
+pub trait InternedValue: Sized + Eq + Hash + Clone + Sync + Send {}
+impl<T: Eq + Hash + Clone + Sync + Send> InternedValue for T {}
 
 pub struct JarImpl<C: Configuration> {
     phantom: PhantomData<C>,
@@ -257,7 +275,7 @@ where
         let memos = unsafe { memo_table_types.attach_memos(memos) };
 
         crate::database::SlotInfo {
-            debug_name: C::DEBUG_NAME,
+            debug_name: C::debug_name(),
             size_of_metadata: std::mem::size_of::<Self>() - std::mem::size_of::<C::Fields<'_>>(),
             size_of_fields: std::mem::size_of::<C::Fields<'_>>(),
             heap_size_of_fields: heap_size,
@@ -837,11 +855,9 @@ where
         unsafe { Self::from_internal_data(&*value.fields.get()) }
     }
 
-    /// Lookup the fields from an interned struct.
-    ///
-    /// Note that this is not "leaking" since no dependency edge is required.
-    pub fn fields<'db>(&'db self, zalsa: &'db Zalsa, s: C::Struct<'db>) -> &'db C::Fields<'db> {
-        self.data(zalsa, AsId::as_id(&s))
+    /// Looks up fields from the configured struct wrapper.
+    pub fn fields<'db>(&'db self, zalsa: &'db Zalsa, value: C::Struct<'db>) -> &'db C::Fields<'db> {
+        self.data(zalsa, AsId::as_id(&value))
     }
 
     pub fn reset(&mut self, zalsa_mut: &mut Zalsa) {
@@ -1003,7 +1019,7 @@ where
     }
 
     fn debug_name(&self) -> &'static str {
-        C::DEBUG_NAME
+        C::debug_name()
     }
 
     fn jar_kind(&self) -> JarKind {

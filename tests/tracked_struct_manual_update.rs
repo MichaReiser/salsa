@@ -11,13 +11,12 @@ static MARK2: AtomicBool = AtomicBool::new(false);
 
 #[salsa::tracked]
 struct Tracked<'db> {
-    #[tracked]
     #[maybe_update(|dst, src| {
         *dst = src;
         MARK1.store(true, Ordering::Release);
         true
     })]
-    tracked: usize,
+    tracked: salsa::TrackedField<usize>,
     #[maybe_update(untracked_update)]
     untracked: usize,
 }

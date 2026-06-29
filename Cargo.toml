@@ -36,6 +36,9 @@ thin-vec = { version = "0.2.14" }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 typeid = "1.0"
 
+# Optional memory accounting for generic Salsa structs.
+get-size2 = { version = "0.10.1", features = ["derive"], optional = true }
+
 # Automatic ingredient registration.
 inventory = { version = "0.3.24", optional = true }
 
@@ -69,6 +72,7 @@ persistence = [
 shuttle = ["dep:shuttle"]
 accumulator = ["salsa-macro-rules/accumulator"]
 macros = ["dep:salsa-macros"]
+get-size = ["dep:get-size2"]
 
 # FIXME: remove `salsa_unstable` before 1.0.
 salsa_unstable = []

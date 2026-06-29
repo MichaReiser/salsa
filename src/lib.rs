@@ -12,6 +12,7 @@ mod database_impl;
 mod durability;
 mod event;
 mod function;
+mod generic;
 mod hash;
 mod id;
 mod ingredient;
@@ -25,6 +26,7 @@ mod revision;
 mod runtime;
 mod salsa_struct;
 mod storage;
+mod struct_id;
 mod sync;
 mod table;
 mod tracing;
@@ -38,7 +40,10 @@ mod zalsa_local;
 mod nonce;
 
 #[cfg(feature = "macros")]
-pub use salsa_macros::{Supertype, Update, accumulator, db, input, interned, tracked};
+pub use salsa_macros::{
+    InputData, InternedData, Struct, Supertype, TrackedData, Update, accumulator, db, input,
+    interned, tracked,
+};
 
 #[cfg(feature = "salsa_unstable")]
 pub use self::database::{IngredientInfo, PageInfo};
@@ -50,9 +55,12 @@ pub use self::cancelled::Cancelled;
 
 pub use self::cycle::Cycle;
 pub use self::database::Database;
-pub use self::database_impl::DatabaseImpl;
+pub use self::database_impl::{DatabaseImpl, DatabaseImplBuilder};
 pub use self::durability::Durability;
 pub use self::event::{Event, EventKind};
+pub use self::generic::{
+    Input, InputData, InputField, Interned, InternedData, Tracked, TrackedData, TrackedField,
+};
 pub use self::id::Id;
 pub use self::input::setter::Setter;
 pub use self::key::DatabaseKeyIndex;
@@ -61,6 +69,9 @@ pub use self::return_mode::SalsaAsRef;
 pub use self::revision::Revision;
 pub use self::runtime::Runtime;
 pub use self::storage::{Storage, StorageHandle};
+pub use self::struct_id::Struct;
+#[doc(hidden)]
+pub use self::struct_id::{InternedStructRepr, StructRepr};
 pub use self::update::{Update, update_fallback};
 pub use self::zalsa::IngredientIndex;
 pub use self::zalsa_local::CancellationToken;
@@ -93,6 +104,8 @@ pub mod plumbing {
         unexpected_cycle_initial, unexpected_cycle_recovery,
     };
 
+    pub use crate::Struct;
+    pub use crate::TrackedField;
     #[cfg(feature = "accumulator")]
     pub use crate::accumulator::Accumulator;
     pub use crate::attach::{attach, with_attached_database};
@@ -101,7 +114,7 @@ pub mod plumbing {
     pub use crate::durability::Durability;
     pub use crate::id::{AsId, FromId, FromIdWithDb, Id};
     pub use crate::ingredient::{Ingredient, Jar, Location};
-    pub use crate::ingredient_cache::IngredientCache;
+    pub use crate::ingredient_cache::{IngredientCache, IngredientIndexCache};
     pub use crate::interned::{HashEqLike, Lookup};
     pub use crate::key::DatabaseKeyIndex;
     pub use crate::memo_ingredient_indices::{
@@ -112,6 +125,7 @@ pub mod plumbing {
     pub use crate::runtime::{Runtime, Stamp, stamp};
     pub use crate::salsa_struct::{SalsaStructInDb, assert_supertype_no_overlap};
     pub use crate::storage::{HasStorage, Storage};
+    pub use crate::struct_id::StructToken;
     pub use crate::table::memo::MemoTableWithTypes;
     pub use crate::tracked_struct::TrackedStructInDb;
     pub use crate::update::helper::{Dispatch as UpdateDispatch, Fallback as UpdateFallback};
@@ -122,6 +136,9 @@ pub mod plumbing {
         transmute_data_ptr, views,
     };
     pub use crate::zalsa_local::ZalsaLocal;
+
+    #[cfg(feature = "get-size")]
+    pub use get_size2::{GetSize, GetSizeTracker};
 
     #[cfg(feature = "persistence")]
     pub use serde;
@@ -156,6 +173,13 @@ pub mod plumbing {
 
     pub mod interned {
         pub use crate::interned::{Configuration, IngredientImpl, JarImpl, Value};
+    }
+
+    pub mod generic {
+        pub use crate::generic::{
+            InputConfig, InputData, InputDataConfig, InternedConfig, InternedData,
+            InternedDataConfig, TrackedConfig, TrackedData, TrackedDataConfig,
+        };
     }
 
     pub mod function {

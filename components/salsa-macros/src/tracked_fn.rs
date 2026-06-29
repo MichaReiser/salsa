@@ -36,9 +36,13 @@ impl AllowedOptions for TrackedFn {
 
     const NO_LIFETIME: bool = false;
 
+    const BARE: bool = false;
+
     const NON_UPDATE_TYPES: bool = true;
 
     const SINGLETON: bool = false;
+
+    const FIELDS: bool = false;
 
     const DATA: bool = false;
 

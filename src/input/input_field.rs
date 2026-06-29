@@ -5,6 +5,7 @@ use crate::function::VerifyResult;
 use crate::hash::{FxHashSet, FxIndexSet};
 use crate::ingredient::Ingredient;
 use crate::input::{Configuration, IngredientImpl, Value};
+use crate::runtime::Stamp;
 use crate::sync::Arc;
 use crate::table::memo::MemoTableTypes;
 use crate::zalsa::{IngredientIndex, JarKind, Zalsa};
@@ -55,6 +56,14 @@ where
         self.index
     }
 
+    fn dependency_stamp(&self, zalsa: &Zalsa, input: Id) -> Stamp {
+        let value = IngredientImpl::<C>::data(zalsa, input);
+        Stamp {
+            durability: value.durabilities[self.field_index],
+            changed_at: value.revisions[self.field_index],
+        }
+    }
+
     unsafe fn maybe_changed_after(
         &self,
         zalsa: &Zalsa,
@@ -76,7 +85,7 @@ where
         assert!(
             C::PERSIST,
             "the inputs of a persistable tracked function must be persistable: `{}` is not persistable",
-            C::DEBUG_NAME
+            C::debug_name()
         );
 
         // Input dependencies are the leaves of the minimum dependency tree.
@@ -97,7 +106,7 @@ where
         write!(
             fmt,
             "{input}.{field}({id:?})",
-            input = C::DEBUG_NAME,
+            input = C::debug_name(),
             field = C::FIELD_DEBUG_NAMES[self.field_index],
             id = index
         )

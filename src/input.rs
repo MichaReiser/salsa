@@ -24,6 +24,24 @@ use crate::{Durability, Id, Revision, Runtime};
 
 pub trait Configuration: Any {
     const DEBUG_NAME: &'static str;
+
+    fn debug_name() -> &'static str {
+        Self::DEBUG_NAME
+    }
+
+    /// Returns this configuration's input ingredient.
+    ///
+    /// Generated configurations override this method with their per-type
+    /// cache. The default supports manually configured structs without adding
+    /// another adapter trait around `Configuration`.
+    fn ingredient(zalsa: &Zalsa) -> &IngredientImpl<Self>
+    where
+        Self: Sized,
+    {
+        let index = zalsa.lookup_jar_by_type::<JarImpl<Self>>();
+        zalsa.lookup_ingredient(index).assert_type()
+    }
+
     const FIELD_DEBUG_NAMES: &'static [&'static str];
     const LOCATION: crate::ingredient::Location;
 
@@ -338,7 +356,7 @@ impl<C: Configuration> Ingredient for IngredientImpl<C> {
     }
 
     fn debug_name(&self) -> &'static str {
-        C::DEBUG_NAME
+        C::debug_name()
     }
 
     fn jar_kind(&self) -> JarKind {
@@ -455,7 +473,7 @@ where
         let memos = unsafe { memo_table_types.attach_memos(&self.memos) };
 
         crate::database::SlotInfo {
-            debug_name: C::DEBUG_NAME,
+            debug_name: C::debug_name(),
             size_of_metadata: std::mem::size_of::<Self>() - std::mem::size_of::<C::Fields>(),
             size_of_fields: std::mem::size_of::<C::Fields>(),
             heap_size_of_fields: heap_size,
@@ -616,8 +634,8 @@ mod persistence {
                     fields: value.fields.0,
                     revisions: value.revisions,
                     durabilities: value.durabilities,
-                    // SAFETY: We only ever access the memos of a value that we allocated through
-                    // our `MemoTableTypes`.
+                    // SAFETY: We only ever access the memos of a value allocated through
+                    // this ingredient's `MemoTableTypes`.
                     memos: unsafe { MemoTable::new(ingredient.memo_table_types()) },
                 };
 

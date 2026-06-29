@@ -179,6 +179,9 @@ const _: () = {
     }
 
     unsafe impl zalsa_::Update for InternedString<'_> {
+        type Erased = InternedString<'static>;
+        type Rebind<'db> = InternedString<'db>;
+
         unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
             if unsafe { *old_pointer } != new_value {
                 unsafe { *old_pointer = new_value };

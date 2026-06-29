@@ -43,9 +43,13 @@ impl AllowedOptions for InternedStruct {
 
     const NO_LIFETIME: bool = true;
 
+    const BARE: bool = true;
+
     const NON_UPDATE_TYPES: bool = true;
 
     const SINGLETON: bool = false;
+
+    const FIELDS: bool = true;
 
     const DATA: bool = true;
 
@@ -98,20 +102,32 @@ impl Macro {
         let salsa_struct = SalsaStruct::new(&self.struct_item, &self.args)?;
 
         let attrs = &self.struct_item.attrs;
+        let fields_heap_size_attrs = crate::salsa_struct::fields_heap_size_attrs(attrs);
         let vis = &self.struct_item.vis;
         let struct_ident = &self.struct_item.ident;
-        let struct_data_ident = format_ident!("{}Data", struct_ident);
+        let fields_ident = salsa_struct.fields_ident(&self.hygiene);
+        let fields_attrs = salsa_struct.fields_attrs();
         let db_lt = db_lifetime::db_lifetime(&self.struct_item.generics);
+        let crate::salsa_struct::FieldsTypes {
+            generics: fields_generics,
+            impl_lifetime: fields_impl_lifetime,
+            ty: fields_type,
+            static_ty: fields_static_type,
+            rebind_lifetime: fields_rebind_lifetime,
+            rebind_ty: fields_rebind_type,
+        } = salsa_struct.fields_types(&self.hygiene, &fields_ident, &db_lt);
+        let fields_have_lifetime = fields_generics.is_some();
         let new_fn = salsa_struct.constructor_name();
+        let fields_fn = salsa_struct.fields_method_name();
         let field_ids = salsa_struct.field_ids();
         let field_indices = salsa_struct.field_indices();
-        let num_fields = salsa_struct.num_fields();
         let field_vis = salsa_struct.field_vis();
         let field_getter_ids = salsa_struct.field_getter_ids();
         let field_options = salsa_struct.field_options();
         let field_tys = salsa_struct.field_tys();
         let field_indexed_tys = salsa_struct.field_indexed_tys();
         let field_unused_attrs = salsa_struct.field_attrs();
+        let storage_field_attrs = salsa_struct.storage_field_attrs();
         let generate_debug_impl = salsa_struct.generate_debug_impl();
         let has_lifetime = salsa_struct.generate_lifetime();
         let id = salsa_struct.id();
@@ -136,8 +152,26 @@ impl Macro {
         let persist = self.args.persist();
         let serialize_fn = salsa_struct.serialize_fn();
         let deserialize_fn = salsa_struct.deserialize_fn();
-
+        let serialize_generics = fields_have_lifetime.then(|| quote!(<#db_lt>));
+        let deserialize_generics = if fields_have_lifetime {
+            quote!(<'de, #db_lt>)
+        } else {
+            quote!(<'de>)
+        };
+        let (fields_serialize, fields_deserialize) = salsa_struct.fields_serde_impls(
+            serialize_generics.unwrap_or_default(),
+            deserialize_generics,
+            fields_type.clone(),
+            field_tys.iter().copied(),
+            None,
+        );
+        let fields_debug = salsa_struct.fields_debug_impl(
+            fields_generics.clone().unwrap_or_default(),
+            fields_type.clone(),
+            field_tys.iter().copied(),
+        );
         let heap_size_fn = self.args.heap_size_fn.iter();
+        let generate_methods = self.args.bare.is_none();
 
         let zalsa = self.hygiene.ident("zalsa");
         let zalsa_struct = self.hygiene.ident("zalsa_struct");
@@ -154,11 +188,31 @@ impl Macro {
         Ok(crate::debug::dump_tokens(
             struct_ident,
             quote! {
+                #fields_attrs
+                #(#fields_heap_size_attrs)*
+                #[derive(Clone, PartialEq, Eq, Hash, salsa::InternedData)]
+                #vis struct #fields_ident #fields_generics {
+                    #(
+                        #(#storage_field_attrs)*
+                        #field_vis #field_ids: #field_tys,
+                    )*
+                }
+
+                #fields_debug
+                #fields_serialize
+                #fields_deserialize
+
                 salsa::plumbing::setup_interned_struct!(
                     attrs: [#(#attrs),*],
                     vis: #vis,
                     Struct: #struct_ident,
-                    StructData: #struct_data_ident,
+                    Fields: #fields_ident,
+                    FieldsType: #fields_type,
+                    FieldsStaticType: #fields_static_type,
+                    FieldsImplGenerics: [#fields_impl_lifetime],
+                    FieldsRebindLifetime: #fields_rebind_lifetime,
+                    FieldsRebindType: #fields_rebind_type,
+                    fields_fn: #fields_fn,
                     StructWithStatic: #cfg,
                     db_lt: #db_lt,
                     db_lt_arg: #db_lt_arg,
@@ -173,8 +227,8 @@ impl Macro {
                     field_indices: [#(#field_indices),*],
                     field_indexed_tys: [#(#field_indexed_tys),*],
                     field_attrs: [#([#(#field_unused_attrs),*]),*],
-                    num_fields: #num_fields,
                     generate_debug_impl: #generate_debug_impl,
+                    generate_methods: #generate_methods,
                     heap_size_fn: #(#heap_size_fn)*,
                     persist: #persist,
                     serialize_fn: #(#serialize_fn)*,

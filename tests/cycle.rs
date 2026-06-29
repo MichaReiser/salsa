@@ -1167,8 +1167,8 @@ fn repeat_provisional_query_incremental() {
 fn repeat_query_participating_in_cycle() {
     #[salsa::input]
     struct Input {
-        value: u32,
-        stable: u32,
+        value: salsa::InputField<u32>,
+        stable: salsa::InputField<u32>,
     }
 
     #[salsa::interned]
@@ -1276,8 +1276,8 @@ fn repeat_query_participating_in_cycle() {
 fn repeat_query_participating_in_cycle2() {
     #[salsa::input]
     struct Input {
-        value: u32,
-        stable: u32,
+        value: salsa::InputField<u32>,
+        stable: salsa::InputField<u32>,
     }
 
     #[salsa::interned]

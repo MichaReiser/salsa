@@ -27,9 +27,8 @@ pub struct FunctionId<'db> {
 // ANCHOR: program
 #[salsa::tracked(debug)]
 pub struct Program<'db> {
-    #[tracked]
     #[returns(ref)]
-    pub statements: Vec<Statement<'db>>,
+    pub statements: salsa::TrackedField<Vec<Statement<'db>>>,
 }
 // ANCHOR_END: program
 
@@ -92,22 +91,18 @@ pub struct Function<'db> {
 
     name_span: Span<'db>,
 
-    #[tracked]
     #[returns(ref)]
-    pub args: Vec<VariableId<'db>>,
+    pub args: salsa::TrackedField<Vec<VariableId<'db>>>,
 
-    #[tracked]
     #[returns(ref)]
-    pub body: Expression<'db>,
+    pub body: salsa::TrackedField<Expression<'db>>,
 }
 // ANCHOR_END: functions
 
 #[salsa::tracked(debug)]
 pub struct Span<'db> {
-    #[tracked]
-    pub start: usize,
-    #[tracked]
-    pub end: usize,
+    pub start: salsa::TrackedField<usize>,
+    pub end: salsa::TrackedField<usize>,
 }
 
 // ANCHOR: diagnostic

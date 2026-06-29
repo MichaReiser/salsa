@@ -105,7 +105,7 @@ fn intern_stuff(db: &dyn salsa::Database) -> String {
 fn execute() {
     let db = salsa::DatabaseImpl::new();
     expect![[r#"
-        "InternedPair { data: (InternedString { data: \"Hello, \" }, InternedString { data: \"World, \" }) }"
+        "Interned(Id(800), InternedPair { data: (Interned(Id(400), InternedString { data: \"Hello, \" }), Interned(Id(401), InternedString { data: \"World, \" })) })"
     "#]].assert_debug_eq(&intern_stuff(&db));
 }
 

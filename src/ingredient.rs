@@ -6,6 +6,7 @@ use crate::database::RawDatabase;
 use crate::function::VerifyResult;
 use crate::hash::{FxHashSet, FxIndexSet};
 use crate::runtime::Running;
+use crate::runtime::Stamp;
 use crate::sync::Arc;
 use crate::table::Table;
 use crate::table::memo::MemoTableTypes;
@@ -39,6 +40,17 @@ pub trait Ingredient: Any + fmt::Debug + Send + Sync {
     fn debug_name(&self) -> &'static str;
     fn location(&self) -> &'static Location;
     fn jar_kind(&self) -> JarKind;
+
+    /// Returns the current stamp for a directly readable dependency.
+    ///
+    /// Input and tracked-field projection ingredients override this when a
+    /// value can report a read from a stored [`DatabaseKeyIndex`].
+    fn dependency_stamp(&self, _zalsa: &Zalsa, _input: Id) -> Stamp {
+        unreachable!(
+            "ingredient `{}` is not directly readable",
+            self.debug_name()
+        )
+    }
 
     /// Has the value for `input` in this ingredient changed after `revision`?
     ///

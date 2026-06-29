@@ -17,14 +17,13 @@ thread_local! {
 
 #[salsa::input]
 struct MyInput {
-    field1: u32,
-    field2: u32,
+    field1: salsa::InputField<u32>,
+    field2: salsa::InputField<u32>,
 }
 
 #[salsa::tracked]
 struct MyTracked<'db> {
-    #[tracked]
-    counter: usize,
+    counter: salsa::TrackedField<usize>,
 }
 
 #[salsa::tracked]

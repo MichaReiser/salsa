@@ -1,19 +1,20 @@
-error[E0277]: the trait bound `MyInterned<'_>: salsa::plumbing::TrackedStructInDb` is not satisfied
+error[E0277]: the trait bound `Interned<'_, MyInterned_Fields_>: salsa::Struct` is not satisfied
   --> tests/compile-fail/specify-does-not-work-if-the-key-is-a-salsa-interned.rs:15:1
    |
 15 | #[salsa::tracked(specify)]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `salsa::Struct` is not implemented for `Interned<'_, MyInterned_Fields_>`
    |
-help: the trait `salsa::plumbing::TrackedStructInDb` is not implemented for `MyInterned<'_>`
+help: the following other types implement trait `salsa::Struct`
   --> tests/compile-fail/specify-does-not-work-if-the-key-is-a-salsa-interned.rs:5:1
    |
  5 | #[salsa::interned]
-   | ^^^^^^^^^^^^^^^^^^
-help: the trait `salsa::plumbing::TrackedStructInDb` is implemented for `MyTracked<'_>`
-  --> tests/compile-fail/specify-does-not-work-if-the-key-is-a-salsa-interned.rs:10:1
-   |
+   | ^^^^^^^^^^^^^^^^^^ `MyInterned<'db>`
+...
 10 | #[salsa::tracked]
-   | ^^^^^^^^^^^^^^^^^
+   | ^^^^^^^^^^^^^^^^^ `MyTracked<'db>`
+   = note: required for `Interned<'_, MyInterned_Fields_>` to implement `salsa::plumbing::TrackedStructInDb`
+   = note: 1 redundant requirement hidden
+   = note: required for `MyInterned<'_>` to implement `salsa::plumbing::TrackedStructInDb`
 note: required by a bound in `salsa::function::specify::<impl salsa::function::IngredientImpl<C>>::specify_and_record`
   --> src/function/specify.rs
    |

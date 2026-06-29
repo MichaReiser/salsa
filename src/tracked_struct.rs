@@ -40,11 +40,22 @@ pub trait Configuration: Sized + 'static {
     /// The debug name of the tracked struct.
     const DEBUG_NAME: &'static str;
 
+    fn debug_name() -> &'static str {
+        Self::DEBUG_NAME
+    }
+
+    /// Returns this configuration's tracked-struct ingredient.
+    ///
+    /// Generated configurations override this method with their per-type
+    /// cache. The default supports manually configured structs without adding
+    /// another adapter trait around `Configuration`.
+    fn ingredient(zalsa: &Zalsa) -> &IngredientImpl<Self> {
+        let index = zalsa.lookup_jar_by_type::<JarImpl<Self>>();
+        zalsa.lookup_ingredient(index).assert_type()
+    }
+
     /// The debug names of any tracked fields.
     const TRACKED_FIELD_NAMES: &'static [&'static str];
-
-    /// The relative indices of any tracked fields.
-    const TRACKED_FIELD_INDICES: &'static [usize];
 
     /// Whether this struct should be persisted with the database.
     const PERSIST: bool;
@@ -67,6 +78,15 @@ pub trait Configuration: Sized + 'static {
     type Revisions: Send + Sync + Index<usize, Output = AtomicRevision>;
 
     type Struct<'db>: Copy + FromId + AsId;
+
+    /// Binds tracked-field wrappers to a newly allocated or regenerated
+    /// parent ID. Configurations without wrappers use the default no-op.
+    fn bind_tracked_fields(
+        _ingredient_index: IngredientIndex,
+        _id: Id,
+        _fields: &mut Self::Fields<'_>,
+    ) {
+    }
 
     fn untracked_fields(fields: &Self::Fields<'_>) -> impl Hash;
 
@@ -148,10 +168,10 @@ impl<C: Configuration> Jar for JarImpl<C> {
         let struct_ingredient = <IngredientImpl<C>>::new(struct_index);
 
         let tracked_field_ingredients =
-            C::TRACKED_FIELD_INDICES
+            C::TRACKED_FIELD_NAMES
                 .iter()
-                .copied()
-                .map(|tracked_index| {
+                .enumerate()
+                .map(|(tracked_index, _)| {
                     Box::new(<FieldIngredientImpl<C>>::new(
                         tracked_index,
                         struct_index.successor(tracked_index),
@@ -558,19 +578,22 @@ where
         zalsa: &'db Zalsa,
         zalsa_local: &'db ZalsaLocal,
         current_deps: &Stamp,
-        fields: C::Fields<'db>,
+        mut fields: C::Fields<'db>,
     ) -> Id {
         let current_revision = zalsa.current_revision();
-        let value = |_| Value {
-            updated_at: OptionalAtomicRevision::new(Some(current_revision)),
-            durability: current_deps.durability,
-            revisions: C::new_revisions(current_deps.changed_at),
+        let value = |id| {
+            C::bind_tracked_fields(self.ingredient_index, id, &mut fields);
+            Value {
+                updated_at: OptionalAtomicRevision::new(Some(current_revision)),
+                durability: current_deps.durability,
+                revisions: C::new_revisions(current_deps.changed_at),
 
-            // SAFETY: We just erase the lifetime
-            fields: unsafe { mem::transmute::<C::Fields<'db>, C::Fields<'static>>(fields) },
-            // SAFETY: We only ever access the memos of a value that we allocated through
-            // our `MemoTableTypes`.
-            memos: unsafe { MemoTable::new(self.memo_table_types()) },
+                // SAFETY: We just erase the lifetime
+                fields: unsafe { mem::transmute::<C::Fields<'db>, C::Fields<'static>>(fields) },
+                // SAFETY: We only ever access the memos of a value that we allocated through
+                // our `MemoTableTypes`.
+                memos: unsafe { MemoTable::new(self.memo_table_types()) },
+            }
         };
 
         while let Some(id) = self.free_list.pop() {
@@ -732,12 +755,21 @@ where
             id = id
                 .next_generation()
                 .expect("already verified that generation is not maximum");
+
+            // The projection ingredient remains the same, but the parent ID
+            // generation is part of every tracked-field dependency key.
+            C::bind_tracked_fields(
+                self.ingredient_index,
+                id,
+                // SAFETY: the write lock gives us exclusive access to fields.
+                unsafe { &mut *old_fields },
+            );
         }
 
         let durability = unsafe { &mut (*data_raw).durability };
         if current_deps.durability < *durability {
             let new_revisions = C::new_revisions(current_deps.changed_at);
-            for i in 0..C::TRACKED_FIELD_INDICES.len() {
+            for i in 0..C::TRACKED_FIELD_NAMES.len() {
                 revisions[i].store(new_revisions[i].load());
             }
         }
@@ -871,37 +903,6 @@ where
         unsafe { self.lock_fields(data, zalsa.current_revision()) }
     }
 
-    /// Access to this tracked field.
-    ///
-    /// Note that this function returns the entire tuple of value fields.
-    /// The caller is responsible for selecting the appropriate element.
-    pub fn tracked_field<'db>(
-        &'db self,
-        zalsa: &'db Zalsa,
-        zalsa_local: &'db ZalsaLocal,
-        s: C::Struct<'db>,
-        relative_tracked_index: usize,
-    ) -> &'db C::Fields<'db> {
-        let id = AsId::as_id(&s);
-        let field_ingredient_index = self.ingredient_index.successor(relative_tracked_index);
-        let data = Self::data_raw(zalsa.table(), id);
-
-        // SAFETY: `data` is a valid pointer acquired from the table.
-        let fields = unsafe { self.lock_fields(data, zalsa.current_revision()) };
-
-        // SAFETY: We just acquired the read lock (in `Self::fields`), so accessing `revisions` will not be able to alias
-        let field_changed_at = unsafe { (&(*data).revisions)[relative_tracked_index].load() };
-
-        // SAFETY: We just acquired the read lock (in `Self::fields`), so accessing `durability` will not be able to alias
-        zalsa_local.report_tracked_read_simple(
-            DatabaseKeyIndex::new(field_ingredient_index, id),
-            unsafe { (*data).durability },
-            field_changed_at,
-        );
-
-        fields
-    }
-
     /// Access to this untracked field.
     ///
     /// Note that this function returns the entire tuple of value fields.
@@ -1031,7 +1032,7 @@ where
     }
 
     fn debug_name(&self) -> &'static str {
-        C::DEBUG_NAME
+        C::debug_name()
     }
 
     fn jar_kind(&self) -> JarKind {
@@ -1162,7 +1163,7 @@ where
         let memos = unsafe { memo_table_types.attach_memos(&self.memos) };
 
         crate::database::SlotInfo {
-            debug_name: C::DEBUG_NAME,
+            debug_name: C::debug_name(),
             size_of_metadata: mem::size_of::<Self>() - mem::size_of::<C::Fields<'_>>(),
             size_of_fields: mem::size_of::<C::Fields<'_>>(),
             heap_size_of_fields: heap_size,

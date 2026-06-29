@@ -115,6 +115,12 @@ pub unsafe fn always_update<T>(old_pointer: *mut T, new_value: T) -> bool {
 ///
 /// Implementing this trait requires the implementor to verify:
 ///
+/// * [`Erased`](Update::Erased) is the canonical `'static` member of the
+///   implementor's lifetime family.
+/// * [`Rebind`](Update::Rebind) is representation-compatible with `Self` and
+///   preserves its validity invariant when the database lifetime is shortened.
+///   Normally it differs only by that lifetime; marker-only generic arguments
+///   may also be erased.
 /// * `maybe_update` ensures the properties it is intended to ensure.
 /// * If the value implements `Eq`, it is safe to compare an instance
 ///   of the value from an older revision with one from the newer
@@ -129,6 +135,16 @@ pub unsafe fn always_update<T>(old_pointer: *mut T, new_value: T) -> bool {
 /// thus invalidating the `'db` lifetime (from a stacked borrows perspective).
 /// Either way, the `Eq` implementation would be invalid.
 pub unsafe trait Update {
+    /// The canonical `'static` type used to identify this lifetime family.
+    ///
+    /// Salsa uses this type for ingredient registration. It does not expose a
+    /// safe conversion from `Self` to `Erased`, because doing so could allow a
+    /// database-branded value to escape its database borrow.
+    type Erased: 'static;
+
+    /// This lifetime family's member branded with `'db`.
+    type Rebind<'db>: 'db;
+
     /// # Returns
     ///
     /// True if the value should be considered to have changed in the new revision.
@@ -159,6 +175,9 @@ pub unsafe trait Update {
 }
 
 unsafe impl Update for std::convert::Infallible {
+    type Erased = Self;
+    type Rebind<'db> = Self;
+
     unsafe fn maybe_update(_old_pointer: *mut Self, new_value: Self) -> bool {
         match new_value {}
     }
@@ -190,6 +209,9 @@ unsafe impl<T> Update for Vec<T>
 where
     T: Update,
 {
+    type Erased = Vec<T::Erased>;
+    type Rebind<'db> = Vec<T::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_vec: Self) -> bool {
         maybe_update_vec!(old_pointer, new_vec, T)
     }
@@ -199,6 +221,9 @@ unsafe impl<T> Update for thin_vec::ThinVec<T>
 where
     T: Update,
 {
+    type Erased = thin_vec::ThinVec<T::Erased>;
+    type Rebind<'db> = thin_vec::ThinVec<T::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_vec: Self) -> bool {
         maybe_update_vec!(old_pointer, new_vec, T)
     }
@@ -206,9 +231,14 @@ where
 
 unsafe impl<A> Update for smallvec::SmallVec<A>
 where
-    A: smallvec::Array,
+    A: smallvec::Array + Update,
     A::Item: Update,
+    A::Erased: smallvec::Array,
+    for<'db> A::Rebind<'db>: smallvec::Array,
 {
+    type Erased = smallvec::SmallVec<A::Erased>;
+    type Rebind<'db> = smallvec::SmallVec<A::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_vec: Self) -> bool {
         maybe_update_vec!(old_pointer, new_vec, A::Item)
     }
@@ -234,8 +264,11 @@ macro_rules! maybe_update_set {
 unsafe impl<K, S> Update for HashSet<K, S>
 where
     K: Update + Eq + Hash,
-    S: BuildHasher,
+    S: BuildHasher + 'static,
 {
+    type Erased = HashSet<K::Erased, S>;
+    type Rebind<'db> = HashSet<K::Rebind<'db>, S>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_set: Self) -> bool {
         maybe_update_set!(old_pointer, new_set)
     }
@@ -245,6 +278,9 @@ unsafe impl<K> Update for BTreeSet<K>
 where
     K: Update + Eq + Ord,
 {
+    type Erased = BTreeSet<K::Erased>;
+    type Rebind<'db> = BTreeSet<K::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_set: Self) -> bool {
         maybe_update_set!(old_pointer, new_set)
     }
@@ -289,8 +325,11 @@ unsafe impl<K, V, S> Update for HashMap<K, V, S>
 where
     K: Update + Eq + Hash,
     V: Update,
-    S: BuildHasher,
+    S: BuildHasher + 'static,
 {
+    type Erased = HashMap<K::Erased, V::Erased, S>;
+    type Rebind<'db> = HashMap<K::Rebind<'db>, V::Rebind<'db>, S>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_map: Self) -> bool {
         maybe_update_map!(old_pointer, new_map)
     }
@@ -300,8 +339,11 @@ unsafe impl<K, V, S> Update for hashbrown::HashMap<K, V, S>
 where
     K: Update + Eq + Hash,
     V: Update,
-    S: BuildHasher,
+    S: BuildHasher + 'static,
 {
+    type Erased = hashbrown::HashMap<K::Erased, V::Erased, S>;
+    type Rebind<'db> = hashbrown::HashMap<K::Rebind<'db>, V::Rebind<'db>, S>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_map: Self) -> bool {
         maybe_update_map!(old_pointer, new_map)
     }
@@ -310,8 +352,11 @@ where
 unsafe impl<K, S> Update for hashbrown::HashSet<K, S>
 where
     K: Update + Eq + Hash,
-    S: BuildHasher,
+    S: BuildHasher + 'static,
 {
+    type Erased = hashbrown::HashSet<K::Erased, S>;
+    type Rebind<'db> = hashbrown::HashSet<K::Rebind<'db>, S>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_set: Self) -> bool {
         maybe_update_set!(old_pointer, new_set)
     }
@@ -321,8 +366,11 @@ unsafe impl<K, V, S> Update for indexmap::IndexMap<K, V, S>
 where
     K: Update + Eq + Hash,
     V: Update,
-    S: BuildHasher,
+    S: BuildHasher + 'static,
 {
+    type Erased = indexmap::IndexMap<K::Erased, V::Erased, S>;
+    type Rebind<'db> = indexmap::IndexMap<K::Rebind<'db>, V::Rebind<'db>, S>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_map: Self) -> bool {
         maybe_update_map!(old_pointer, new_map)
     }
@@ -331,8 +379,11 @@ where
 unsafe impl<K, S> Update for indexmap::IndexSet<K, S>
 where
     K: Update + Eq + Hash,
-    S: BuildHasher,
+    S: BuildHasher + 'static,
 {
+    type Erased = indexmap::IndexSet<K::Erased, S>;
+    type Rebind<'db> = indexmap::IndexSet<K::Rebind<'db>, S>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_set: Self) -> bool {
         maybe_update_set!(old_pointer, new_set)
     }
@@ -343,8 +394,11 @@ unsafe impl<K, V, S> Update for ordermap::OrderMap<K, V, S>
 where
     K: Update + Eq + Hash,
     V: Update,
-    S: BuildHasher,
+    S: BuildHasher + 'static,
 {
+    type Erased = ordermap::OrderMap<K::Erased, V::Erased, S>;
+    type Rebind<'db> = ordermap::OrderMap<K::Rebind<'db>, V::Rebind<'db>, S>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_map: Self) -> bool {
         let old_map = unsafe { &mut *old_pointer };
 
@@ -361,8 +415,11 @@ where
 unsafe impl<K, S> Update for ordermap::OrderSet<K, S>
 where
     K: Update + Eq + Hash,
-    S: BuildHasher,
+    S: BuildHasher + 'static,
 {
+    type Erased = ordermap::OrderSet<K::Erased, S>;
+    type Rebind<'db> = ordermap::OrderSet<K::Rebind<'db>, S>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_set: Self) -> bool {
         maybe_update_set!(old_pointer, new_set)
     }
@@ -373,6 +430,9 @@ where
     K: Update + Eq + Ord,
     V: Update,
 {
+    type Erased = BTreeMap<K::Erased, V::Erased>;
+    type Rebind<'db> = BTreeMap<K::Rebind<'db>, V::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_map: Self) -> bool {
         maybe_update_map!(old_pointer, new_map)
     }
@@ -382,6 +442,9 @@ unsafe impl<T> Update for Box<T>
 where
     T: Update,
 {
+    type Erased = Box<T::Erased>;
+    type Rebind<'db> = Box<T::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_box: Self) -> bool {
         let old_box: &mut Box<T> = unsafe { &mut *old_pointer };
 
@@ -393,6 +456,9 @@ unsafe impl<T> Update for Box<[T]>
 where
     T: Update,
 {
+    type Erased = Box<[T::Erased]>;
+    type Rebind<'db> = Box<[T::Rebind<'db>]>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_box: Self) -> bool {
         let old_box: &mut Box<[T]> = unsafe { &mut *old_pointer };
 
@@ -413,6 +479,9 @@ unsafe impl<T> Update for Arc<T>
 where
     T: Update,
 {
+    type Erased = Arc<T::Erased>;
+    type Rebind<'db> = Arc<T::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_arc: Self) -> bool {
         let old_arc: &mut Arc<T> = unsafe { &mut *old_pointer };
 
@@ -441,6 +510,9 @@ unsafe impl<T> Update for triomphe::Arc<T>
 where
     T: Update,
 {
+    type Erased = triomphe::Arc<T::Erased>;
+    type Rebind<'db> = triomphe::Arc<T::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_arc: Self) -> bool {
         let old_arc: &mut triomphe::Arc<T> = unsafe { &mut *old_pointer };
 
@@ -468,6 +540,9 @@ unsafe impl<T, const N: usize> Update for [T; N]
 where
     T: Update,
 {
+    type Erased = [T::Erased; N];
+    type Rebind<'db> = [T::Rebind<'db>; N];
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_vec: Self) -> bool {
         let old_pointer = old_pointer.cast::<T>();
         let mut changed = false;
@@ -483,6 +558,9 @@ where
     T: Update,
     E: Update,
 {
+    type Erased = Result<T::Erased, E::Erased>;
+    type Rebind<'db> = Result<T::Rebind<'db>, E::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
         let old_value = unsafe { &mut *old_pointer };
         match (old_value, new_value) {
@@ -502,6 +580,9 @@ where
     L: Update,
     R: Update,
 {
+    type Erased = Either<L::Erased, R::Erased>;
+    type Rebind<'db> = Either<L::Rebind<'db>, R::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
         let old_value = unsafe { &mut *old_pointer };
         match (old_value, new_value) {
@@ -519,6 +600,9 @@ macro_rules! fallback_impl {
     ($($t:ty,)*) => {
         $(
             unsafe impl Update for $t {
+                type Erased = Self;
+                type Rebind<'db> = Self;
+
                 unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
                     unsafe { update_fallback(old_pointer, new_value) }
                 }
@@ -556,6 +640,9 @@ macro_rules! tuple_impl {
         where
             $($t: Update,)*
         {
+            type Erased = ($($t::Erased,)*);
+            type Rebind<'db> = ($($t::Rebind<'db>,)*);
+
             #[allow(non_snake_case)]
             unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
                 let ($($t,)*) = new_value;
@@ -591,6 +678,9 @@ unsafe impl<T> Update for Option<T>
 where
     T: Update,
 {
+    type Erased = Option<T::Erased>;
+    type Rebind<'db> = Option<T::Rebind<'db>>;
+
     unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
         let old_value = unsafe { &mut *old_pointer };
         match (old_value, new_value) {
@@ -605,6 +695,12 @@ where
 }
 
 unsafe impl<T> Update for PhantomData<T> {
+    // `PhantomData` has no runtime value to preserve. The enclosing derived
+    // type performs the meaningful lifetime rebinding; erasing the marker
+    // itself to `()` keeps this compatibility implementation unconditional.
+    type Erased = PhantomData<()>;
+    type Rebind<'db> = PhantomData<()>;
+
     unsafe fn maybe_update(_old_pointer: *mut Self, _new_value: Self) -> bool {
         false
     }

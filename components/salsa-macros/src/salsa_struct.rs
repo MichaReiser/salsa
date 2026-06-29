@@ -4,7 +4,7 @@
 //! Example of usage:
 //!
 //! ```rust,ignore
-//! #[salsa::interned(jar = Jar0, data = TyData0)]
+//! #[salsa::interned(fields = TyFields)]
 //! #[derive(Eq, PartialEq, Hash, Debug, Clone)]
 //! struct Ty0 {
 //!    field1: Type1,
@@ -12,30 +12,37 @@
 //!    ...
 //! }
 //! ```
-//! For an interned or entity struct `Foo`, we generate:
+//! For a Salsa struct `Foo`, we generate:
 //!
 //! * the actual struct: `struct Foo(Id);`
+//! * a struct containing the stored fields (hidden unless `fields = Name` is set)
 //! * constructor function: `impl Foo { fn new(db: &crate::Db, field1: Type1, ..., fieldN: TypeN) -> Self { ... } }
 //! * field accessors: `impl Foo { fn field1(&self) -> Type1 { self.field1.clone() } }`
 //!     * if the field is `ref`, we generate `fn field1(&self) -> &Type1`
-//!
-//! Only if there are no `ref` fields:
-//!
-//! * the data type: `struct FooData { field1: Type1, ... }` or `enum FooData { ... }`
-//! * data method `impl Foo { fn data(&self, db: &dyn crate::Db) -> FooData { FooData { f: self.f(db), ... } } }`
-//!     * this could be optimized, particularly for interned fields
+//! * a `fields` method that borrows the stored fields in one operation
 
 use proc_macro2::{Ident, Literal, Span, TokenStream};
+use quote::ToTokens;
 use syn::parse::ParseStream;
-use syn::{ext::IdentExt, spanned::Spanned};
+use syn::{GenericArgument, PathArguments, ext::IdentExt, spanned::Spanned};
 
 use crate::db_lifetime;
+use crate::hygiene::Hygiene;
 use crate::options::{AllowedOptions, Options};
 
 pub(crate) struct SalsaStruct<'s, A: SalsaStructAllowedOptions> {
     struct_item: &'s syn::ItemStruct,
     args: &'s Options<A>,
     fields: Vec<SalsaField<'s>>,
+}
+
+pub(crate) struct FieldsTypes {
+    pub(crate) generics: Option<TokenStream>,
+    pub(crate) impl_lifetime: Option<syn::Lifetime>,
+    pub(crate) ty: TokenStream,
+    pub(crate) static_ty: TokenStream,
+    pub(crate) rebind_lifetime: syn::Lifetime,
+    pub(crate) rebind_ty: TokenStream,
 }
 
 pub(crate) trait SalsaStructAllowedOptions: AllowedOptions {
@@ -117,6 +124,13 @@ where
     A: SalsaStructAllowedOptions,
 {
     pub fn new(struct_item: &'s syn::ItemStruct, args: &'s Options<A>) -> syn::Result<Self> {
+        if args.bare.is_some() && args.fields.is_none() {
+            return Err(syn::Error::new_spanned(
+                &struct_item.ident,
+                "`fields = Name` is required in bare mode",
+            ));
+        }
+
         let syn::Fields::Named(n) = &struct_item.fields else {
             return Err(syn::Error::new_spanned(
                 &struct_item.ident,
@@ -150,6 +164,58 @@ where
         match self.args.constructor_name.clone() {
             Some(name) => name,
             None => Ident::new("new", self.struct_item.ident.span()),
+        }
+    }
+
+    pub(crate) fn fields_ident(&self, hygiene: &Hygiene) -> syn::Ident {
+        self.args
+            .fields
+            .clone()
+            .unwrap_or_else(|| hygiene.scoped_ident(&self.struct_item.ident, "Fields"))
+    }
+
+    pub(crate) fn fields_attrs(&self) -> TokenStream {
+        if self.args.fields.is_none() {
+            quote!(#[doc(hidden)])
+        } else {
+            TokenStream::new()
+        }
+    }
+
+    pub(crate) fn fields_types(
+        &self,
+        hygiene: &Hygiene,
+        fields_ident: &Ident,
+        db_lifetime: &syn::Lifetime,
+    ) -> FieldsTypes {
+        let has_lifetime = self.fields_use_lifetime(db_lifetime);
+        let generics = has_lifetime.then(|| quote!(<#db_lifetime>));
+        let impl_lifetime = has_lifetime.then_some(db_lifetime.clone());
+        let ty = if has_lifetime {
+            quote!(#fields_ident<#db_lifetime>)
+        } else {
+            quote!(#fields_ident)
+        };
+        let static_ty = if has_lifetime {
+            quote!(#fields_ident<'static>)
+        } else {
+            quote!(#fields_ident)
+        };
+        let rebind_ident = hygiene.ident("fields_rebind");
+        let rebind_lifetime = syn::Lifetime::new(&format!("'{rebind_ident}"), rebind_ident.span());
+        let rebind_ty = if has_lifetime {
+            quote!(#fields_ident<#rebind_lifetime>)
+        } else {
+            quote!(#fields_ident)
+        };
+
+        FieldsTypes {
+            generics,
+            impl_lifetime,
+            ty,
+            static_ty,
+            rebind_lifetime,
+            rebind_ty,
         }
     }
 
@@ -264,9 +330,33 @@ where
             .collect()
     }
 
+    pub(crate) fn fields_iter(&self) -> impl Iterator<Item = &SalsaField<'s>> {
+        self.fields.iter()
+    }
+
     pub(crate) fn tracked_ids(&self) -> Vec<&syn::Ident> {
         self.tracked_fields_iter()
             .map(|(_, f)| f.field.ident.as_ref().unwrap())
+            .collect()
+    }
+
+    pub(crate) fn untracked_ids(&self) -> Vec<&syn::Ident> {
+        self.untracked_fields_iter()
+            .map(|(_, f)| f.field.ident.as_ref().unwrap())
+            .collect()
+    }
+
+    pub(crate) fn tracked_flags(&self) -> Vec<bool> {
+        self.fields
+            .iter()
+            .map(|field| field.tracked_type().is_some())
+            .collect()
+    }
+
+    pub(crate) fn input_flags(&self) -> Vec<bool> {
+        self.fields
+            .iter()
+            .map(|field| field.input_type().is_some())
             .collect()
     }
 
@@ -276,24 +366,8 @@ where
             .collect()
     }
 
-    pub(crate) fn tracked_field_indices(&self) -> Vec<Literal> {
-        self.tracked_fields_iter()
-            .map(|(index, _)| Literal::usize_unsuffixed(index))
-            .collect()
-    }
-
-    pub(crate) fn untracked_field_indices(&self) -> Vec<Literal> {
-        self.untracked_fields_iter()
-            .map(|(index, _)| Literal::usize_unsuffixed(index))
-            .collect()
-    }
-
     pub(crate) fn num_fields(&self) -> Literal {
         Literal::usize_unsuffixed(self.fields.len())
-    }
-
-    pub(crate) fn num_tracked_fields(&self) -> Literal {
-        Literal::usize_unsuffixed(self.tracked_fields_iter().count())
     }
 
     pub(crate) fn required_fields(&self) -> Vec<TokenStream> {
@@ -304,7 +378,7 @@ where
                     None
                 } else {
                     let ident = f.field.ident.as_ref().unwrap();
-                    let ty = &f.field.ty;
+                    let ty = wrapper_inner_type(&f.field.ty, "InputField").unwrap_or(&f.field.ty);
                     Some(quote!(#ident #ty))
                 }
             })
@@ -347,6 +421,15 @@ where
         self.fields.iter().map(|f| &f.set_name).collect()
     }
 
+    pub(crate) fn fields_method_name(&self) -> syn::Ident {
+        let name = if self.fields.iter().any(|field| field.get_name == "fields") {
+            "salsa_fields"
+        } else {
+            "fields"
+        };
+        syn::Ident::new(name, self.struct_item.ident.span())
+    }
+
     pub(crate) fn field_durability_ids(&self) -> Vec<syn::Ident> {
         self.fields
             .iter()
@@ -360,7 +443,7 @@ where
 
     pub(crate) fn tracked_tys(&self) -> Vec<&syn::Type> {
         self.tracked_fields_iter()
-            .map(|(_, f)| &f.field.ty)
+            .map(|(_, field)| field.tracked_type().unwrap())
             .collect()
     }
 
@@ -380,6 +463,25 @@ where
 
     pub(crate) fn field_attrs(&self) -> Vec<&[&syn::Attribute]> {
         self.fields.iter().map(|f| &*f.unknown_attrs).collect()
+    }
+
+    /// Attributes that can safely be copied to the generated storage fields.
+    ///
+    /// Qualified attributes may name helper attributes consumed by derives on
+    /// the user's original struct, so only ordinary one-segment attributes are
+    /// retained.
+    pub(crate) fn storage_field_attrs(&self) -> Vec<Vec<&syn::Attribute>> {
+        self.fields
+            .iter()
+            .map(|field| {
+                field
+                    .unknown_attrs
+                    .iter()
+                    .copied()
+                    .filter(|attr| attr.path().segments.len() == 1)
+                    .collect()
+            })
+            .collect()
     }
 
     pub(crate) fn tracked_field_attrs(&self) -> Vec<&[&syn::Attribute]> {
@@ -418,18 +520,148 @@ where
         self.args.no_lifetime.is_none()
     }
 
+    pub(crate) fn fields_use_lifetime(&self, lifetime: &syn::Lifetime) -> bool {
+        struct Finder<'a> {
+            lifetime: &'a syn::Lifetime,
+            found: bool,
+        }
+
+        impl syn::visit::Visit<'_> for Finder<'_> {
+            fn visit_lifetime(&mut self, lifetime: &syn::Lifetime) {
+                self.found |= lifetime.ident == self.lifetime.ident;
+            }
+        }
+
+        let mut finder = Finder {
+            lifetime,
+            found: false,
+        };
+        for field in &self.fields {
+            syn::visit::Visit::visit_type(&mut finder, &field.field.ty);
+        }
+        finder.found
+    }
+
+    /// Generates serde impls for the retained fields struct when persistence
+    /// uses Salsa's default serializer or deserializer.
+    pub(crate) fn fields_serde_impls<T>(
+        &self,
+        serialize_generics: TokenStream,
+        deserialize_generics: TokenStream,
+        fields_type: TokenStream,
+        field_tys: impl IntoIterator<Item = T>,
+        extra_initializer: Option<TokenStream>,
+    ) -> (Option<TokenStream>, Option<TokenStream>)
+    where
+        T: ToTokens,
+    {
+        let field_ids = self.field_ids();
+        let field_tys = field_tys.into_iter().collect::<Vec<_>>();
+        let persist = self.args.persist();
+
+        let hidden = self.args.fields.is_none();
+        let serialize = (persist
+            && (hidden
+                || self
+                    .args
+                    .persist
+                    .as_ref()
+                    .is_some_and(|options| options.serialize_fn.is_none())))
+        .then(|| {
+            quote! {
+                impl #serialize_generics ::salsa::plumbing::serde::Serialize for #fields_type {
+                    fn serialize<S>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error>
+                    where
+                        S: ::salsa::plumbing::serde::Serializer,
+                    {
+                        ::salsa::plumbing::serde::Serialize::serialize(
+                            &(#(&self.#field_ids,)*),
+                            serializer,
+                        )
+                    }
+                }
+            }
+        });
+
+        let deserialize = (persist
+            && (hidden
+                || self
+                    .args
+                    .persist
+                    .as_ref()
+                    .is_some_and(|options| options.deserialize_fn.is_none())))
+        .then(|| {
+            quote! {
+                impl #deserialize_generics ::salsa::plumbing::serde::Deserialize<'de>
+                    for #fields_type
+                {
+                    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+                    where
+                        D: ::salsa::plumbing::serde::Deserializer<'de>,
+                    {
+                        let (#(#field_ids,)*) =
+                            <(#(#field_tys,)*) as ::salsa::plumbing::serde::Deserialize>::deserialize(deserializer)?;
+                        Ok(Self {
+                            #(#field_ids,)*
+                            #extra_initializer
+                        })
+                    }
+                }
+            }
+        });
+
+        (serialize, deserialize)
+    }
+
+    /// Implements `Debug` for the retained fields without requiring every
+    /// Salsa struct to have debug-printable fields.
+    pub(crate) fn fields_debug_impl<T>(
+        &self,
+        impl_generics: TokenStream,
+        fields_type: TokenStream,
+        field_tys: impl IntoIterator<Item = T>,
+    ) -> TokenStream
+    where
+        T: ToTokens,
+    {
+        let fields_name = &self.struct_item.ident;
+        let field_ids = self.field_ids();
+        let field_tys = field_tys.into_iter().collect::<Vec<_>>();
+        let bounds = (!field_tys.is_empty()).then(|| {
+            quote! {
+                where
+                    #(for<'__salsa_debug> #field_tys: ::core::fmt::Debug,)*
+            }
+        });
+
+        quote! {
+            impl #impl_generics ::core::fmt::Debug for #fields_type
+            #bounds
+            {
+                fn fmt(
+                    &self,
+                    formatter: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    let mut formatter = formatter.debug_struct(stringify!(#fields_name));
+                    #(let formatter = formatter.field(stringify!(#field_ids), &self.#field_ids);)*
+                    formatter.finish()
+                }
+            }
+        }
+    }
+
     pub fn tracked_fields_iter(&self) -> impl Iterator<Item = (usize, &SalsaField<'s>)> {
         self.fields
             .iter()
             .enumerate()
-            .filter(|(_, f)| f.has_tracked_attr)
+            .filter(|(_, field)| field.tracked_type().is_some())
     }
 
     pub fn untracked_fields_iter(&self) -> impl Iterator<Item = (usize, &SalsaField<'s>)> {
         self.fields
             .iter()
             .enumerate()
-            .filter(|(_, f)| !f.has_tracked_attr)
+            .filter(|(_, field)| field.tracked_type().is_none())
     }
 
     /// Returns the path to the `serialize` function as an optional iterator.
@@ -464,6 +696,14 @@ where
 }
 
 impl<'s> SalsaField<'s> {
+    pub(crate) fn tracked_type(&self) -> Option<&syn::Type> {
+        wrapper_inner_type(&self.field.ty, "TrackedField")
+    }
+
+    pub(crate) fn input_type(&self) -> Option<&syn::Type> {
+        wrapper_inner_type(&self.field.ty, "InputField")
+    }
+
     fn new(field: &'s syn::Field) -> syn::Result<Self> {
         let field_name = field.ident.as_ref().unwrap();
         let field_name_str = field_name.to_string();
@@ -529,4 +769,39 @@ impl<'s> SalsaField<'s> {
 
         quote!((#returns, #default_ident))
     }
+}
+
+pub(crate) fn wrapper_inner_type<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != wrapper {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| match argument {
+        GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })
+}
+
+/// Heap-size derives are meaningful on the retained fields value as well as
+/// on the nominal ID wrapper.
+pub(crate) fn fields_heap_size_attrs(attrs: &[syn::Attribute]) -> Vec<&syn::Attribute> {
+    use quote::ToTokens as _;
+
+    attrs
+        .iter()
+        .filter(|attr| {
+            (attr.path().is_ident("cfg_attr") || attr.path().is_ident("derive"))
+                && attr
+                    .meta
+                    .to_token_stream()
+                    .to_string()
+                    .contains("get_size2")
+        })
+        .collect()
 }

@@ -39,11 +39,15 @@ impl AllowedOptions for TrackedStruct {
 
     const NO_LIFETIME: bool = false;
 
+    const BARE: bool = true;
+
     const NON_UPDATE_TYPES: bool = false;
 
     const SINGLETON: bool = false;
 
-    const DATA: bool = true;
+    const FIELDS: bool = true;
+
+    const DATA: bool = false;
 
     const DB: bool = false;
 
@@ -73,7 +77,7 @@ impl SalsaStructAllowedOptions for TrackedStruct {
 
     const ALLOW_MAYBE_UPDATE: bool = true;
 
-    const ALLOW_TRACKED: bool = true;
+    const ALLOW_TRACKED: bool = false;
 
     const HAS_LIFETIME: bool = true;
 
@@ -95,13 +99,27 @@ impl Macro {
         let zalsa = self.hygiene.ident("zalsa");
 
         let attrs = &self.struct_item.attrs;
+        let fields_heap_size_attrs = crate::salsa_struct::fields_heap_size_attrs(attrs);
         let vis = &self.struct_item.vis;
         let struct_ident = &self.struct_item.ident;
+        let fields_ident = salsa_struct.fields_ident(&self.hygiene);
+        let fields_attrs = salsa_struct.fields_attrs();
         let db_lt = db_lifetime::db_lifetime(&self.struct_item.generics);
+        let crate::salsa_struct::FieldsTypes {
+            generics: fields_generics,
+            impl_lifetime: fields_impl_lifetime,
+            ty: fields_type,
+            static_ty: fields_static_type,
+            rebind_lifetime: fields_rebind_lifetime,
+            rebind_ty: fields_rebind_type,
+        } = salsa_struct.fields_types(&self.hygiene, &fields_ident, &db_lt);
+        let fields_have_lifetime = fields_generics.is_some();
         let new_fn = salsa_struct.constructor_name();
+        let fields_fn = salsa_struct.fields_method_name();
 
         let field_ids = salsa_struct.field_ids();
         let tracked_ids = salsa_struct.tracked_ids();
+        let untracked_ids = salsa_struct.untracked_ids();
 
         let tracked_vis = salsa_struct.tracked_vis();
         let untracked_vis = salsa_struct.untracked_vis();
@@ -109,25 +127,56 @@ impl Macro {
         let tracked_getter_ids = salsa_struct.tracked_getter_ids();
         let untracked_getter_ids = salsa_struct.untracked_getter_ids();
 
-        let field_indices = salsa_struct.field_indices();
-
-        let absolute_tracked_indices = salsa_struct.tracked_field_indices();
-        let relative_tracked_indices = (0..absolute_tracked_indices.len()).collect::<Vec<_>>();
-
-        let absolute_untracked_indices = salsa_struct.untracked_field_indices();
-
         let tracked_options = salsa_struct.tracked_options();
         let untracked_options = salsa_struct.untracked_options();
 
         let field_tys = salsa_struct.field_tys();
+        let field_storage_tys = field_tys.iter().map(|ty| quote!(#ty)).collect::<Vec<_>>();
+        let field_value_tys = field_tys
+            .iter()
+            .zip(salsa_struct.tracked_flags())
+            .map(|(ty, tracked)| {
+                if tracked {
+                    let inner =
+                        crate::salsa_struct::wrapper_inner_type(ty, "TrackedField").unwrap();
+                    quote!(#inner)
+                } else {
+                    quote!(#ty)
+                }
+            })
+            .collect::<Vec<_>>();
+        let field_kinds = salsa_struct
+            .tracked_flags()
+            .into_iter()
+            .map(|tracked| {
+                syn::Ident::new(
+                    if tracked { "tracked" } else { "untracked" },
+                    proc_macro2::Span::call_site(),
+                )
+            })
+            .collect::<Vec<_>>();
         let tracked_tys = salsa_struct.tracked_tys();
         let untracked_tys = salsa_struct.untracked_tys();
 
         let tracked_field_unused_attrs = salsa_struct.tracked_field_attrs();
         let untracked_field_unused_attrs = salsa_struct.untracked_field_attrs();
+        let storage_field_attrs = salsa_struct.storage_field_attrs();
+        let tracked_data_attrs = salsa_struct
+            .fields_iter()
+            .map(|field| {
+                if field.has_no_eq_attr {
+                    quote!(#[salsa(no_eq)])
+                } else if let Some((_, maybe_update)) = &field.maybe_update_attr {
+                    quote!(#[salsa(maybe_update = #maybe_update)])
+                } else {
+                    quote!()
+                }
+            })
+            .collect::<Vec<_>>();
+        let field_vis = salsa_struct.field_vis();
 
         let field_to_maybe_update = |(_, field): (usize, &SalsaField<'_>)| {
-            let field_ty = &field.field.ty;
+            let field_ty = field.tracked_type().unwrap_or(&field.field.ty);
             if field.has_no_eq_attr {
                 quote! {(#zalsa::always_update::<#field_ty>)}
             } else if let Some((with_token, maybe_update)) = &field.maybe_update_attr {
@@ -147,11 +196,28 @@ impl Macro {
         let persist = self.args.persist();
         let serialize_fn = salsa_struct.serialize_fn();
         let deserialize_fn = salsa_struct.deserialize_fn();
-
+        let serialize_generics = fields_have_lifetime.then(|| quote!(<#db_lt>));
+        let deserialize_generics = if fields_have_lifetime {
+            quote!(<'de, #db_lt>)
+        } else {
+            quote!(<'de>)
+        };
+        let (fields_serialize, fields_deserialize) = salsa_struct.fields_serde_impls(
+            serialize_generics.unwrap_or_default(),
+            deserialize_generics,
+            fields_type.clone(),
+            field_storage_tys.iter(),
+            None,
+        );
+        let fields_debug = salsa_struct.fields_debug_impl(
+            fields_generics.clone().unwrap_or_default(),
+            fields_type.clone(),
+            field_tys.iter().copied(),
+        );
         let heap_size_fn = self.args.heap_size_fn.iter();
 
-        let num_tracked_fields = salsa_struct.num_tracked_fields();
         let generate_debug_impl = salsa_struct.generate_debug_impl();
+        let generate_methods = self.args.bare.is_none();
 
         let zalsa_struct = self.hygiene.ident("zalsa_struct");
         let Configuration = self.hygiene.ident("Configuration");
@@ -162,29 +228,47 @@ impl Macro {
         Ok(crate::debug::dump_tokens(
             struct_ident,
             quote! {
+                #fields_attrs
+                #(#fields_heap_size_attrs)*
+                #[derive(salsa::TrackedData)]
+                #vis struct #fields_ident #fields_generics {
+                    #(
+                        #tracked_data_attrs
+                        #(#storage_field_attrs)*
+                        #field_vis #field_ids: #field_storage_tys,
+                    )*
+                }
+
+                #fields_debug
+                #fields_serialize
+                #fields_deserialize
+
                 salsa::plumbing::setup_tracked_struct!(
                     attrs: [#(#attrs),*],
                     vis: #vis,
                     Struct: #struct_ident,
+                    Fields: #fields_ident,
+                    FieldsType: #fields_type,
+                    FieldsStaticType: #fields_static_type,
+                    FieldsImplGenerics: [#fields_impl_lifetime],
+                    FieldsRebindLifetime: #fields_rebind_lifetime,
+                    FieldsRebindType: #fields_rebind_type,
+                    fields_fn: #fields_fn,
                     db_lt: #db_lt,
                     new_fn: #new_fn,
 
                     field_ids: [#(#field_ids),*],
                     tracked_ids: [#(#tracked_ids),*],
+                    untracked_ids: [#(#untracked_ids),*],
+                    field_kinds: [#(#field_kinds),*],
 
                     tracked_getters: [#(#tracked_vis #tracked_getter_ids),*],
                     untracked_getters: [#(#untracked_vis #untracked_getter_ids),*],
 
-                    field_tys: [#(#field_tys),*],
+                    field_tys: [#(#field_value_tys),*],
                     tracked_tys: [#(#tracked_tys),*],
                     untracked_tys: [#(#untracked_tys),*],
 
-                    field_indices: [#(#field_indices),*],
-
-                    absolute_tracked_indices: [#(#absolute_tracked_indices),*],
-                    relative_tracked_indices: [#(#relative_tracked_indices),*],
-
-                    absolute_untracked_indices: [#(#absolute_untracked_indices),*],
 
                     tracked_maybe_updates: [#(#tracked_maybe_update),*],
                     untracked_maybe_updates: [#(#untracked_maybe_update),*],
@@ -195,8 +279,8 @@ impl Macro {
                     tracked_field_attrs: [#([#(#tracked_field_unused_attrs),*]),*],
                     untracked_field_attrs: [#([#(#untracked_field_unused_attrs),*]),*],
 
-                    num_tracked_fields: #num_tracked_fields,
                     generate_debug_impl: #generate_debug_impl,
+                    generate_methods: #generate_methods,
 
                     heap_size_fn: #(#heap_size_fn)*,
 

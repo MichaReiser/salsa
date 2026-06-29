@@ -1,7 +1,6 @@
 #[salsa::tracked]
 struct UnknownAttributeTrackedStruct<'db> {
-    #[tracked]
-    tracked: bool,
+    tracked: salsa::TrackedField<bool>,
     #[unknown_attr]
     field: bool,
     #[salsa::tracked]

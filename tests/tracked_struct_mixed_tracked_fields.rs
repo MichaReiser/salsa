@@ -10,15 +10,13 @@ use salsa::{Database, Setter};
 struct Tracked<'db> {
     untracked_1: usize,
 
-    #[tracked]
-    tracked_1: usize,
+    tracked_1: salsa::TrackedField<usize>,
 
     untracked_2: usize,
 
     untracked_3: usize,
 
-    #[tracked]
-    tracked_2: usize,
+    tracked_2: salsa::TrackedField<usize>,
 
     untracked_4: usize,
 }

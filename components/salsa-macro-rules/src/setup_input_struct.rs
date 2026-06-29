@@ -1,70 +1,32 @@
-/// Macro for setting up a function that must intern its arguments.
+/// Sets up an input struct backed by `salsa::Input<Fields>`.
 #[macro_export]
 macro_rules! setup_input_struct {
     (
-        // Attributes on the struct
         attrs: [$(#[$attr:meta]),*],
-
-        // Visibility of the struct
         vis: $vis:vis,
-
-        // Name of the struct
         Struct: $Struct:ident,
-
-        // Name user gave for `new`
+        Fields: $Fields:ident,
+        fields_fn: $fields_fn:ident,
         new_fn: $new_fn:ident,
-
-        // A series of option tuples; see `setup_tracked_struct` macro
         field_options: [$($field_option:tt),*],
-
-        // Field names
         field_ids: [$($field_id:ident),*],
-
-        // Names for field getter methods (typically `foo`)
         field_getters: [$($field_getter_vis:vis $field_getter_id:ident),*],
-
-        // Names for field setter methods (typically `set_foo`)
         field_setters: [$($field_setter_vis:vis $field_setter_id:ident),*],
-
-        // Field types
         field_tys: [$($field_ty:ty),*],
-
-        // Indices for each field from 0..N -- must be unsuffixed (e.g., `0`, `1`).
+        field_value_tys: [$($field_value_ty:ty),*],
+        field_kinds: [$($field_kind:ident),*],
         field_indices: [$($field_index:tt),*],
-
-        // Attributes for each field
         field_attrs: [$([$(#[$field_attr:meta]),*]),*],
-
-        // Fields that are required (have no default value). Each item is the fields name and type.
         required_fields: [$($required_field_id:ident $required_field_ty:ty),*],
-
-        // Names for the field durability methods on the builder (typically `foo_durability`)
         field_durability_ids: [$($field_durability_id:ident),*],
-
-        // Number of fields
         num_fields: $N:literal,
-
-        // If true, this is a singleton input.
         is_singleton: $is_singleton:tt,
-
-        // If true, generate a debug impl.
         generate_debug_impl: $generate_debug_impl:tt,
-
-        // The function used to implement `C::heap_size`.
+        generate_methods: $generate_methods:tt,
         heap_size_fn: $($heap_size_fn:path)?,
-
-        // If `true`, `serialize_fn` and `deserialize_fn` have been provided.
         persist: $persist:tt,
-
-        // The path to the `serialize` function for the value's fields.
         serialize_fn: $($serialize_fn:path)?,
-
-        // The path to the `serialize` function for the value's fields.
         deserialize_fn: $($deserialize_fn:path)?,
-
-        // Annoyingly macro-rules hygiene does not extend to items defined in the macro.
-        // We have the procedural macro generate names for those items that are
-        // not used elsewhere in the user's code.
         unused_names: [
             $zalsa:ident,
             $zalsa_struct:ident,
@@ -75,8 +37,9 @@ macro_rules! setup_input_struct {
         ]
     ) => {
         $(#[$attr])*
-        #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-        $vis struct $Struct(salsa::Id);
+        #[derive(Copy, Clone, PartialEq, Eq, Hash, ::salsa::Struct, ::salsa::Update)]
+        #[salsa(configuration, debug = $generate_debug_impl)]
+        $vis struct $Struct(::salsa::Input<$Fields>);
 
         #[allow(clippy::all)]
         #[allow(dead_code)]
@@ -86,33 +49,30 @@ macro_rules! setup_input_struct {
 
             type $Configuration = $Struct;
 
-            impl $zalsa::HasJar for $Struct {
-                type Jar = $zalsa_struct::JarImpl<$Configuration>;
-                const KIND: $zalsa::JarKind = $zalsa::JarKind::Struct;
-            }
-
-            $zalsa::register_jar! {
-                $zalsa::ErasedJar::erase::<$Struct>()
-            }
-
             impl $zalsa_struct::Configuration for $Configuration {
                 const LOCATION: $zalsa::Location = $zalsa::Location {
                     file: file!(),
                     line: line!(),
                 };
                 const DEBUG_NAME: &'static str = stringify!($Struct);
-                const FIELD_DEBUG_NAMES: &'static [&'static str] = &[$(stringify!($field_id)),*];
-
+                const FIELD_DEBUG_NAMES: &'static [&'static str] = &["fields"];
                 const PERSIST: bool = $persist;
 
-                type Singleton = $zalsa::macro_if! {if $is_singleton {$zalsa::input::Singleton} else {$zalsa::input::NotSingleton}};
-
+                type Singleton = $zalsa::macro_if! {
+                    if $is_singleton {
+                        $zalsa::input::Singleton
+                    } else {
+                        $zalsa::input::NotSingleton
+                    }
+                };
                 type Struct = $Struct;
+                type Fields = $Fields;
+                type Revisions = [$zalsa::Revision; 1];
+                type Durabilities = [$zalsa::Durability; 1];
 
-                type Fields = ($($field_ty,)*);
-
-                type Revisions = [$zalsa::Revision; $N];
-                type Durabilities = [$zalsa::Durability; $N];
+                fn ingredient(zalsa: &$zalsa::Zalsa) -> &$zalsa_struct::IngredientImpl<Self> {
+                    Self::ingredient_(zalsa)
+                }
 
                 $(
                     fn heap_size(value: &Self::Fields) -> Option<usize> {
@@ -144,97 +104,25 @@ macro_rules! setup_input_struct {
                         }
                     }
                 }
-
             }
 
             impl $Configuration {
-                pub fn ingredient(db: &dyn $zalsa::Database) -> &$zalsa_struct::IngredientImpl<Self> {
-                    Self::ingredient_(db.zalsa())
+                $zalsa::macro_if! { $generate_methods =>
+                    pub fn ingredient(
+                        db: &dyn $zalsa::Database,
+                    ) -> &$zalsa_struct::IngredientImpl<Self> {
+                        Self::ingredient_(db.zalsa())
+                    }
                 }
 
                 fn ingredient_(zalsa: &$zalsa::Zalsa) -> &$zalsa_struct::IngredientImpl<Self> {
                     static CACHE: $zalsa::IngredientCache<$zalsa_struct::IngredientImpl<$Configuration>> =
                         $zalsa::IngredientCache::new();
 
-                    // SAFETY: `lookup_jar_by_type` returns a valid ingredient index, and the only
-                    // ingredient created by our jar is the struct ingredient.
+                    // SAFETY: this jar's first and only ingredient is the input struct ingredient.
                     unsafe {
                         CACHE.get_or_create::<$zalsa_struct::JarImpl<$Configuration>, 0>(zalsa)
                     }
-                }
-
-                pub fn ingredient_mut(zalsa_mut: &mut $zalsa::Zalsa) -> (&mut $zalsa_struct::IngredientImpl<Self>, &mut $zalsa::Runtime) {
-                    zalsa_mut.new_revision();
-                    let index = zalsa_mut.lookup_jar_by_type::<$zalsa_struct::JarImpl<$Configuration>>();
-                    let (ingredient, runtime) = zalsa_mut.lookup_ingredient_mut(index);
-                    let ingredient = ingredient.assert_type_mut::<$zalsa_struct::IngredientImpl<Self>>();
-                    (ingredient, runtime)
-                }
-            }
-
-            impl $zalsa::FromId for $Struct {
-                fn from_id(id: salsa::Id) -> Self {
-                    Self(id)
-                }
-            }
-
-            impl $zalsa::AsId for $Struct {
-                fn as_id(&self) -> salsa::Id {
-                    self.0
-                }
-            }
-
-            unsafe impl $zalsa::Update for $Struct {
-                unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
-                    if unsafe { *old_pointer } != new_value {
-                        unsafe { *old_pointer = new_value };
-                        true
-                    } else {
-                        false
-                    }
-                }
-            }
-
-            $zalsa::macro_if! { $generate_debug_impl =>
-                impl ::std::fmt::Debug for $Struct {
-                    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                        Self::default_debug_fmt(*self, f)
-                    }
-                }
-            }
-
-            impl $zalsa::SalsaStructInDb for $Struct {
-                type MemoIngredientMap = $zalsa::MemoIngredientSingletonIndex;
-                const LEAF_TYPE_IDS: &'static [$zalsa::ConstTypeId] = &[$zalsa::ConstTypeId::of::<$Struct>()];
-
-                fn lookup_ingredient_index(aux: &$zalsa::Zalsa) -> $zalsa::IngredientIndices {
-                    aux.lookup_jar_by_type::<$zalsa_struct::JarImpl<$Configuration>>().into()
-                }
-
-                fn entries(
-                    zalsa: &$zalsa::Zalsa
-                ) -> impl Iterator<Item = $zalsa::DatabaseKeyIndex> + '_ {
-                    let ingredient_index = zalsa.lookup_jar_by_type::<$zalsa_struct::JarImpl<$Configuration>>();
-                    <$Configuration>::ingredient_(zalsa).entries(zalsa).map(|entry| entry.key())
-                }
-
-                #[inline]
-                fn cast(id: $zalsa::Id, type_id: $zalsa::TypeId) -> $zalsa::Option<Self> {
-                    if type_id == $zalsa::TypeId::of::<$Struct>() {
-                        $zalsa::Some($Struct(id))
-                    } else {
-                        $zalsa::None
-                    }
-                }
-
-                #[inline]
-                unsafe fn memo_table(
-                    zalsa: &$zalsa::Zalsa,
-                    id: $zalsa::Id,
-                    current_revision: $zalsa::Revision,
-                ) -> $zalsa::MemoTableWithTypes<'_> {
-                    // SAFETY: Guaranteed by caller.
-                    unsafe { zalsa.table().memos::<$zalsa_struct::Value<$Configuration>>(id, current_revision) }
                 }
             }
 
@@ -258,186 +146,225 @@ macro_rules! setup_input_struct {
                     }
                 }
             }
-            impl $Struct {
-                #[inline]
-                pub fn $new_fn<$Db>(db: &$Db, $($required_field_id: $required_field_ty),*) -> Self
-                where
-                    // FIXME(rust-lang/rust#65991): The `db` argument *should* have the type `dyn Database`
-                    $Db: ?Sized + salsa::Database,
-                {
-                    Self::builder($($required_field_id,)*).new(db)
-                }
 
-                pub fn builder($($required_field_id: $required_field_ty),*) -> <Self as $zalsa_struct::HasBuilder>::Builder
-                {
-                    builder::new_builder($($zalsa::maybe_default!($field_option, $field_ty, $field_id,)),*)
-                }
-
-                $(
-                    $(#[$field_attr])*
-                    $field_getter_vis fn $field_getter_id<'db, $Db>(self, db: &'db $Db) -> $zalsa::return_mode_ty!($field_option, 'db, $field_ty)
+            $zalsa::macro_if! { $generate_methods =>
+                impl $Struct {
+                    #[inline]
+                    pub fn $new_fn<$Db>(db: &$Db, $($required_field_id: $required_field_ty),*) -> Self
                     where
-                        // FIXME(rust-lang/rust#65991): The `db` argument *should* have the type `dyn Database`
                         $Db: ?Sized + $zalsa::Database,
                     {
-                        let (zalsa, zalsa_local) = db.zalsas();
-                        let fields = $Configuration::ingredient_(zalsa).field(
-                            zalsa,
-                            zalsa_local,
-                            self,
-                            $field_index,
-                        );
-                        $zalsa::return_mode_expression!(
-                            $field_option,
-                            $field_ty,
-                            &fields.$field_index,
-                        )
-                    }
-                )*
-
-                $(
-                    #[must_use]
-                    $field_setter_vis fn $field_setter_id<'db, $Db>(self, db: &'db mut $Db) -> impl salsa::Setter<FieldTy = $field_ty>
-                    where
-                        // FIXME(rust-lang/rust#65991): The `db` argument *should* have the type `dyn Database`
-                        $Db: ?Sized + $zalsa::Database,
-                    {
-                        let zalsa = db.zalsa_mut();
-                        let (ingredient, revision) = $Configuration::ingredient_mut(zalsa);
-                        $zalsa::input::SetterImpl::new(
-                            revision,
-                            self,
-                            $field_index,
-                            ingredient,
-                            |fields, f| ::std::mem::replace(&mut fields.$field_index, f),
-                        )
-                    }
-                )*
-
-                $zalsa::macro_if! { $is_singleton =>
-                    pub fn try_get<$Db>(db: &$Db) -> Option<Self>
-                    where
-                        // FIXME(rust-lang/rust#65991): The `db` argument *should* have the type `dyn Database`
-                        $Db: ?Sized + salsa::Database,
-                    {
-                        let zalsa = db.zalsa();
-                        $Configuration::ingredient_(zalsa).get_singleton_input(zalsa)
+                        Self::builder($($required_field_id,)*).new(db)
                     }
 
-                    #[track_caller]
-                    pub fn get<$Db>(db: &$Db) -> Self
-                    where
-                        // FIXME(rust-lang/rust#65991): The `db` argument *should* have the type `dyn Database`
-                        $Db: ?Sized + salsa::Database,
-                    {
-                        Self::try_get(db).unwrap()
+                    pub fn builder($($required_field_id: $required_field_ty),*) -> <Self as $zalsa_struct::HasBuilder>::Builder {
+                        builder::new_builder($($zalsa::maybe_default!($field_option, $field_value_ty, $field_id,)),*)
                     }
-                }
-
-                /// Default debug formatting for this struct (may be useful if you define your own `Debug` impl)
-                pub fn default_debug_fmt(this: Self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result
-                where
-                    // rustc rejects trivial bounds, but it cannot see through higher-ranked bounds
-                    // with its check :^)
-                    $(for<'__trivial_bounds> $field_ty: ::std::fmt::Debug),*
-                {
-                    $zalsa::with_attached_database(|db| {
-                        let zalsa = db.zalsa();
-                        let fields = $Configuration::ingredient_(zalsa).leak_fields(zalsa, this);
-                        let mut f = f.debug_struct(stringify!($Struct));
-                        let f = f.field("[salsa id]", &$zalsa::AsId::as_id(&this));
-                        $(
-                            let f = f.field(stringify!($field_id), &fields.$field_index);
-                        )*
-                        f.finish()
-                    }).unwrap_or_else(|| {
-                        f.debug_struct(stringify!($Struct))
-                            .field("[salsa id]", &this.0)
-                            .finish()
-                    })
-                }
-            }
-
-            impl $zalsa_struct::HasBuilder for $Struct {
-                type Builder = builder::$Builder;
-            }
-
-            // Implement `new` here instead of inside the builder module
-            // because $Configuration can't be named in `builder`.
-            impl builder::$Builder {
-                /// Creates the new input with the set values.
-                #[must_use]
-                pub fn new<$Db>(self, db: &$Db) -> $Struct
-                where
-                    // FIXME(rust-lang/rust#65991): The `db` argument *should* have the type `dyn Database`
-                    $Db: ?Sized + ::salsa::Database
-                {
-                    let (zalsa, zalsa_local) = db.zalsas();
-                    let current_revision = zalsa.current_revision();
-                    let ingredient = $Configuration::ingredient_(zalsa);
-                    let (fields, revision, durabilities) = builder::builder_into_inner(self, current_revision);
-                    ingredient.new_input(zalsa, zalsa_local, fields, revision, durabilities)
-                }
-            }
-
-            mod builder {
-                use super::*;
-
-                use ::salsa::plumbing as $zalsa;
-                use $zalsa::input as $zalsa_struct;
-
-                // These are standalone functions instead of methods on `Builder` to prevent
-                // that the enclosing module can call them.
-                pub(super) fn new_builder($($field_id: $field_ty),*) -> $Builder {
-                    $Builder {
-                        fields: ($($field_id,)*),
-                        durabilities: [::salsa::Durability::default(); $N],
-                    }
-                }
-
-                pub(super) fn builder_into_inner(builder: $Builder, revision: $zalsa::Revision) -> (($($field_ty,)*), [$zalsa::Revision; $N], [$zalsa::Durability; $N]) {
-                    (builder.fields, [revision; $N], [$(builder.durabilities[$field_index]),*])
-                }
-
-                #[must_use]
-                pub struct $Builder {
-                    /// The field values.
-                    fields: ($($field_ty,)*),
-
-                    /// The durabilities per field.
-                    durabilities: [::salsa::Durability; $N],
-                }
-
-                impl $Builder {
-                    /// Sets the durability of all fields.
-                    ///
-                    /// Overrides any previously set durabilities.
-                    pub fn durability(mut self, durability: ::salsa::Durability) -> Self {
-                        self.durabilities = [durability; $N];
-                        self
-                    }
-
-                    $($zalsa::maybe_default_tt! { $field_option =>
-                        /// Sets the value of the field `$field_id`.
-                        #[must_use]
-                        pub fn $field_id(mut self, value: $field_ty) -> Self
-                        {
-                            self.fields.$field_index = value;
-                            self
-                        }
-                    })*
 
                     $(
-                        /// Sets the durability for the field `$field_id`.
-                        #[must_use]
-                        pub fn $field_durability_id(mut self, durability: ::salsa::Durability) -> Self
+                        $(#[$field_attr])*
+                        $field_getter_vis fn $field_getter_id<'db, $Db>(
+                            self,
+                            db: &'db $Db,
+                        ) -> $zalsa::return_mode_ty!($field_option, 'db, $field_value_ty)
+                        where
+                            $Db: ?Sized + $zalsa::Database,
                         {
-                            self.durabilities[$field_index] = durability;
-                            self
+                            $crate::setup_input_struct!(
+                                @get $field_kind,
+                                $Configuration,
+                                $Fields,
+                                db,
+                                self,
+                                $field_id,
+                                $field_option,
+                                $field_value_ty
+                            )
                         }
                     )*
+
+                    /// Returns all fields and records a dependency on the whole input record.
+                    pub fn $fields_fn<'db, $Db>(self, db: &'db $Db) -> &'db $Fields
+                    where
+                        $Db: ?Sized + $zalsa::Database,
+                        {
+                        ::salsa::Input::<$Fields>::fields(db, self)
+                    }
+
+                    $(
+                        #[must_use]
+                        $field_setter_vis fn $field_setter_id<'db, $Db>(
+                            self,
+                            db: &'db mut $Db,
+                        ) -> impl ::salsa::Setter<FieldTy = $field_value_ty> + 'db
+                        where
+                            $Db: ?Sized + $zalsa::Database,
+                        {
+                            $crate::setup_input_struct!(
+                                @set $field_kind,
+                                $Configuration,
+                                $Fields,
+                                db,
+                                self,
+                                $field_id
+                            )
+                        }
+                    )*
+
+                    $zalsa::macro_if! { $is_singleton =>
+                        pub fn try_get<$Db>(db: &$Db) -> Option<Self>
+                        where
+                            $Db: ?Sized + $zalsa::Database,
+                        {
+                            let zalsa = db.zalsa();
+                            $Configuration::ingredient_(zalsa).get_singleton_input(zalsa)
+                        }
+
+                        #[track_caller]
+                        pub fn get<$Db>(db: &$Db) -> Self
+                        where
+                            $Db: ?Sized + $zalsa::Database,
+                        {
+                            Self::try_get(db).unwrap()
+                        }
+                    }
+
+                    /// Default debug formatting for this struct.
+                    pub fn default_debug_fmt(
+                        this: Self,
+                        f: &mut ::std::fmt::Formatter<'_>,
+                    ) -> ::std::fmt::Result
+                    where
+                        $(for<'__trivial_bounds> $field_ty: ::std::fmt::Debug),*
+                    {
+                        ::std::fmt::Debug::fmt($zalsa::Struct::as_repr(&this), f)
+                    }
+                }
+
+                impl $zalsa_struct::HasBuilder for $Struct {
+                    type Builder = builder::$Builder;
+                }
+
+                impl builder::$Builder {
+                    /// Creates the new input with the set values.
+                    #[must_use]
+                    pub fn new<$Db>(self, db: &$Db) -> $Struct
+                    where
+                        $Db: ?Sized + $zalsa::Database,
+                    {
+                        let (values, durabilities) = builder::builder_into_inner(self);
+                        let fields = $Fields {
+                            $(
+                                $field_id: $crate::setup_input_struct!(
+                                    @field_init $field_kind,
+                                    db,
+                                    values.$field_index,
+                                    durabilities[$field_index]
+                                ),
+                            )*
+                        };
+                        let (zalsa, zalsa_local) = db.zalsas();
+                        let revision = zalsa.current_revision();
+                        let durability = durabilities.iter().copied().min().unwrap_or_default();
+                        $Configuration::ingredient_(zalsa).new_input(
+                            zalsa,
+                            zalsa_local,
+                            fields,
+                            [revision],
+                            [durability],
+                        )
+                    }
+                }
+
+                mod builder {
+                    use super::*;
+                    use ::salsa::plumbing as $zalsa;
+
+                    pub(super) fn new_builder($($field_id: $field_value_ty),*) -> $Builder {
+                        $Builder {
+                            fields: ($($field_id,)*),
+                            durabilities: [$zalsa::Durability::default(); $N],
+                        }
+                    }
+
+                    pub(super) fn builder_into_inner(
+                        builder: $Builder,
+                    ) -> (($($field_value_ty,)*), [$zalsa::Durability; $N]) {
+                        (builder.fields, builder.durabilities)
+                    }
+
+                    #[must_use]
+                    pub struct $Builder {
+                        fields: ($($field_value_ty,)*),
+                        durabilities: [$zalsa::Durability; $N],
+                    }
+
+                    impl $Builder {
+                        /// Sets the durability of all fields.
+                        pub fn durability(mut self, durability: $zalsa::Durability) -> Self {
+                            self.durabilities = [durability; $N];
+                            self
+                        }
+
+                        $($zalsa::maybe_default_tt! { $field_option =>
+                            /// Sets this field's value.
+                            #[must_use]
+                            pub fn $field_id(mut self, value: $field_value_ty) -> Self {
+                                self.fields.$field_index = value;
+                                self
+                            }
+                        })*
+
+                        $(
+                            /// Sets this field's durability.
+                            #[must_use]
+                            pub fn $field_durability_id(
+                                mut self,
+                                durability: $zalsa::Durability,
+                            ) -> Self {
+                                self.durabilities[$field_index] = durability;
+                                self
+                            }
+                        )*
+                    }
                 }
             }
         };
     };
+
+    (@field_init input, $db:ident, $value:expr, $durability:expr) => {
+        ::salsa::InputField::new_with_durability($db, $value, $durability)
+    };
+    (@field_init plain, $db:ident, $value:expr, $durability:expr) => {
+        $value
+    };
+
+    (@get input, $Configuration:ident, $Fields:ident, $db:ident, $this:ident, $field_id:ident, $field_option:tt, $field_ty:ty) => {{
+        let fields = ::salsa::Input::<$Fields>::fields_untracked($db, $this);
+        let value = fields.$field_id.get($db);
+        $crate::return_mode_expression!($field_option, $field_ty, value,)
+    }};
+    (@get plain, $Configuration:ident, $Fields:ident, $db:ident, $this:ident, $field_id:ident, $field_option:tt, $field_ty:ty) => {{
+        let fields = ::salsa::Input::<$Fields>::fields($db, $this);
+        $crate::return_mode_expression!($field_option, $field_ty, &fields.$field_id,)
+    }};
+
+    (@set input, $Configuration:ident, $Fields:ident, $db:ident, $this:ident, $field_id:ident) => {{
+        let handle = {
+            ::salsa::Input::<$Fields>::fields_untracked($db, $this)
+                .$field_id
+        };
+        handle.set($db)
+    }};
+    (@set plain, $Configuration:ident, $Fields:ident, $db:ident, $this:ident, $field_id:ident) => {{
+        let zalsa = $db.zalsa_mut();
+        zalsa.new_revision();
+        let index = zalsa.lookup_jar_by_type::<::salsa::plumbing::input::JarImpl<$Configuration>>();
+        let (ingredient, runtime) = zalsa.lookup_ingredient_mut(index);
+        let ingredient = ingredient.assert_type_mut::<::salsa::plumbing::input::IngredientImpl<$Configuration>>();
+        ::salsa::plumbing::input::SetterImpl::new(runtime, $this, 0, ingredient, |fields, value| {
+            ::std::mem::replace(&mut fields.$field_id, value)
+        })
+    }};
+
 }

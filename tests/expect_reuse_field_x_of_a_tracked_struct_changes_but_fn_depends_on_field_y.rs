@@ -29,10 +29,8 @@ fn final_result_depends_on_y(db: &dyn LogDatabase, input: MyInput) -> u32 {
 
 #[salsa::tracked]
 struct MyTracked<'db> {
-    #[tracked]
-    x: u32,
-    #[tracked]
-    y: u32,
+    x: salsa::TrackedField<u32>,
+    y: salsa::TrackedField<u32>,
 }
 
 #[salsa::tracked]
@@ -55,13 +53,13 @@ fn execute() {
     assert_eq!(final_result_depends_on_x(&db, input), 22);
     db.assert_logs(expect![[r#"
         [
-            "final_result_depends_on_x(MyInput { [salsa id]: Id(0), field: 22 })",
+            "final_result_depends_on_x(Input(Id(0), MyInput { field: 22 }))",
         ]"#]]);
 
     assert_eq!(final_result_depends_on_y(&db, input), 22);
     db.assert_logs(expect![[r#"
         [
-            "final_result_depends_on_y(MyInput { [salsa id]: Id(0), field: 22 })",
+            "final_result_depends_on_y(Input(Id(0), MyInput { field: 22 }))",
         ]"#]]);
 
     input.set_field(&mut db).to(23);
@@ -71,7 +69,7 @@ fn execute() {
     assert_eq!(final_result_depends_on_x(&db, input), 24);
     db.assert_logs(expect![[r#"
         [
-            "final_result_depends_on_x(MyInput { [salsa id]: Id(0), field: 23 })",
+            "final_result_depends_on_x(Input(Id(0), MyInput { field: 23 }))",
         ]"#]]);
 
     // y = 23 / 2 = 11

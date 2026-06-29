@@ -4,17 +4,17 @@
 
 use salsa::{Database as _, Setter as _};
 
-#[salsa::input(heap_size = string_tuple_size_of)]
+#[salsa::input(fields = MyInputFields, heap_size = string_fields_size_of)]
 struct MyInput {
     field: String,
 }
 
-#[salsa::tracked(heap_size = string_tuple_size_of)]
+#[salsa::tracked(fields = MyTrackedFields, heap_size = string_fields_size_of)]
 struct MyTracked<'db> {
     field: String,
 }
 
-#[salsa::interned(heap_size = string_tuple_size_of)]
+#[salsa::interned(fields = MyInternedFields, heap_size = string_fields_size_of)]
 struct MyInterned<'db> {
     field: String,
 }
@@ -73,8 +73,30 @@ fn string_size_of(x: &String) -> usize {
     x.capacity()
 }
 
-fn string_tuple_size_of((x,): &(String,)) -> usize {
-    x.capacity()
+trait HasStringField {
+    fn field(&self) -> &String;
+}
+
+impl HasStringField for MyInputFields {
+    fn field(&self) -> &String {
+        &self.field
+    }
+}
+
+impl HasStringField for MyTrackedFields {
+    fn field(&self) -> &String {
+        &self.field
+    }
+}
+
+impl HasStringField for MyInternedFields {
+    fn field(&self) -> &String {
+        &self.field
+    }
+}
+
+fn string_fields_size_of(fields: &impl HasStringField) -> usize {
+    fields.field().capacity()
 }
 
 #[salsa::tracked]

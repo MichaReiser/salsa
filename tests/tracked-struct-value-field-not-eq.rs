@@ -25,9 +25,8 @@ impl From<bool> for NotEq {
 
 #[salsa::tracked]
 struct MyTracked<'db> {
-    #[tracked]
     #[no_eq]
-    field: NotEq,
+    field: salsa::TrackedField<NotEq>,
 }
 
 #[salsa::tracked]

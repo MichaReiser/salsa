@@ -350,14 +350,17 @@ impl Zalsa {
     #[doc(hidden)]
     #[inline]
     pub fn lookup_jar_by_type<J: Jar>(&self) -> IngredientIndex {
-        let jar_type_id = TypeId::of::<J>();
-
-        *self.jar_map.get(&jar_type_id).unwrap_or_else(|| {
+        self.try_lookup_jar_by_type::<J>().unwrap_or_else(|| {
             panic!(
                 "ingredient `{}` was not registered",
                 std::any::type_name::<J>()
             )
         })
+    }
+
+    #[inline]
+    pub(crate) fn try_lookup_jar_by_type<J: Jar>(&self) -> Option<IngredientIndex> {
+        self.jar_map.get(&TypeId::of::<J>()).copied()
     }
 
     /// Type-erased jar lookup used by shared ingredient cache initialization.
@@ -366,10 +369,13 @@ impl Zalsa {
         jar_type_id: TypeId,
         jar_type_name: &'static str,
     ) -> IngredientIndex {
-        *self
-            .jar_map
-            .get(&jar_type_id)
+        self.try_lookup_jar_by_type_id(jar_type_id)
             .unwrap_or_else(|| panic!("ingredient `{jar_type_name}` was not registered"))
+    }
+
+    #[inline]
+    pub(crate) fn try_lookup_jar_by_type_id(&self, jar_type_id: TypeId) -> Option<IngredientIndex> {
+        self.jar_map.get(&jar_type_id).copied()
     }
 
     fn insert_jar(&mut self, jar: ErasedJar) {

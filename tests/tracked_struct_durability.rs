@@ -34,26 +34,22 @@ struct File {
 
 #[salsa::tracked]
 struct Definition<'db> {
-    #[tracked]
-    file: File,
+    file: salsa::TrackedField<File>,
 }
 
 #[salsa::tracked]
 struct Index<'db> {
-    #[tracked]
-    definitions: Definitions<'db>,
+    definitions: salsa::TrackedField<Definitions<'db>>,
 }
 
 #[salsa::tracked]
 struct Definitions<'db> {
-    #[tracked]
-    definition: Definition<'db>,
+    definition: salsa::TrackedField<Definition<'db>>,
 }
 
 #[salsa::tracked]
 struct Inference<'db> {
-    #[tracked]
-    definition: Definition<'db>,
+    definition: salsa::TrackedField<Definition<'db>>,
 }
 
 #[salsa::tracked]

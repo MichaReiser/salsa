@@ -11,9 +11,16 @@ macro_rules! setup_interned_struct {
         // Name of the struct
         Struct: $Struct:ident,
 
-        // Name of the struct data. This is a parameter because `std::concat_idents`
-        // is unstable and taking an additional dependency is unnecessary.
-        StructData: $StructDataIdent:ident,
+        // Name and concrete types of the struct containing the interned fields.
+        Fields: $Fields:ident,
+        FieldsType: $FieldsType:ty,
+        FieldsStaticType: $FieldsStaticType:ty,
+        FieldsImplGenerics: [$($FieldsImplLifetime:lifetime)?],
+        FieldsRebindLifetime: $FieldsRebindLifetime:lifetime,
+        FieldsRebindType: $FieldsRebindType:ty,
+
+        // Name of the batch field accessor (`salsa_fields` if `fields` is occupied).
+        fields_fn: $fields_fn:ident,
 
         // Name of the struct type with a `'static` argument (unless this type has no db lifetime,
         // in which case this is the same as `$Struct`)
@@ -60,11 +67,11 @@ macro_rules! setup_interned_struct {
         // Attrs for each field.
         field_attrs: [$([$(#[$field_attr:meta]),*]),*],
 
-        // Number of fields
-        num_fields: $N:literal,
-
         // If true, generate a debug impl.
         generate_debug_impl: $generate_debug_impl:tt,
+
+        // If true, generate constructors and accessors.
+        generate_methods: $generate_methods:tt,
 
         // The function used to implement `C::heap_size`.
         heap_size_fn: $($heap_size_fn:path)?,
@@ -92,10 +99,10 @@ macro_rules! setup_interned_struct {
         ]
     ) => {
         $(#[$attr])*
-        #[derive(Copy, Clone, PartialEq, Eq, Hash)]
+        #[derive(Copy, Clone, PartialEq, Eq, Hash, ::salsa::Struct, ::salsa::Update)]
+        #[salsa(configuration, debug = $generate_debug_impl)]
         $vis struct $Struct< $($db_lt_arg)? >(
-            $Id,
-            std::marker::PhantomData<fn() -> &$interior_lt ()>
+            ::salsa::Interned<$interior_lt, $FieldsType>
         );
 
         #[allow(clippy::all)]
@@ -106,16 +113,19 @@ macro_rules! setup_interned_struct {
 
             type $Configuration = $StructWithStatic;
 
-            impl<$($db_lt_arg)?> $zalsa::HasJar for $Struct<$($db_lt_arg)?> {
-                type Jar = $zalsa_struct::JarImpl<$Configuration>;
-                const KIND: $zalsa::JarKind = $zalsa::JarKind::Struct;
-            }
+            $($assert_types_are_update)*
 
-            $zalsa::register_jar! {
-                $zalsa::ErasedJar::erase::<$StructWithStatic>()
-            }
+            unsafe impl<$($FieldsImplLifetime)?> $zalsa::Update for $FieldsType {
+                type Erased = $FieldsStaticType;
+                type Rebind<$FieldsRebindLifetime> = $FieldsRebindType;
 
-            type $StructDataIdent<$db_lt> = ($($field_ty,)*);
+                unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
+                    // Interned fields are immutable after insertion. This implementation
+                    // exists to describe the lifetime family used by the representation.
+                    unsafe { *old_pointer = new_value };
+                    true
+                }
+            }
 
             /// Key to use during hash lookups. Each field is some type that implements `Lookup<T>`
             /// for the owned type. This permits interning with an `&str` when a `String` is required and so forth.
@@ -126,26 +136,34 @@ macro_rules! setup_interned_struct {
             );
 
             impl<$db_lt, $($indexed_ty,)*> $zalsa::HashEqLike<StructKey<$db_lt, $($indexed_ty),*>>
-                for $StructDataIdent<$db_lt>
+                for $FieldsType
                 where
                 $($field_ty: $zalsa::HashEqLike<$indexed_ty>),*
                 {
 
                 fn hash<H: ::std::hash::Hasher>(&self, h: &mut H) {
-                    $($zalsa::HashEqLike::<$indexed_ty>::hash(&self.$field_index, &mut *h);)*
+                    $($zalsa::HashEqLike::<$indexed_ty>::hash(&self.$field_id, &mut *h);)*
                 }
 
                 fn eq(&self, data: &StructKey<$db_lt, $($indexed_ty),*>) -> bool {
-                    ($($zalsa::HashEqLike::<$indexed_ty>::eq(&self.$field_index, &data.$field_index) && )* true)
+                    ($($zalsa::HashEqLike::<$indexed_ty>::eq(&self.$field_id, &data.$field_index) && )* true)
                 }
             }
 
-            impl<$db_lt, $($indexed_ty: $zalsa::Lookup<$field_ty>),*> $zalsa::Lookup<$StructDataIdent<$db_lt>>
+            impl<$db_lt, $($indexed_ty: $zalsa::Lookup<$field_ty>),*> $zalsa::Lookup<$FieldsType>
                 for StructKey<$db_lt, $($indexed_ty),*> {
 
                 #[allow(unused_unit)]
-                fn into_owned(self) -> $StructDataIdent<$db_lt> {
-                    ($($zalsa::Lookup::into_owned(self.$field_index),)*)
+                fn into_owned(self) -> $FieldsType {
+                    $Fields {
+                        $($field_id: $zalsa::Lookup::into_owned(self.$field_index),)*
+                    }
+                }
+            }
+
+            impl<$db_lt> ::std::cmp::PartialEq<($($field_ty,)*)> for $FieldsType {
+                fn eq(&self, other: &($($field_ty,)*)) -> bool {
+                    $((&self.$field_id == &other.$field_index) &&)* true
                 }
             }
 
@@ -161,8 +179,12 @@ macro_rules! setup_interned_struct {
                     const REVISIONS: ::core::num::NonZeroUsize = ::core::num::NonZeroUsize::new($revisions).unwrap();
                 )?
 
-                type Fields<'a> = $StructDataIdent<'a>;
-                type Struct<'db> = $Struct< $($db_lt_arg)? >;
+                type Fields<$db_lt> = $FieldsType;
+                type Struct<$db_lt> = $Struct<$($db_lt_arg)?>;
+
+                fn ingredient(zalsa: &$zalsa::Zalsa) -> &$zalsa_struct::IngredientImpl<Self> {
+                    Self::ingredient_(zalsa)
+                }
 
                 $(
                     fn heap_size(value: &Self::Fields<'_>) -> Option<usize> {
@@ -197,7 +219,13 @@ macro_rules! setup_interned_struct {
             }
 
             impl $Configuration {
-                pub fn ingredient(zalsa: &$zalsa::Zalsa) -> &$zalsa_struct::IngredientImpl<Self> {
+                $zalsa::macro_if! { $generate_methods =>
+                    pub fn ingredient(zalsa: &$zalsa::Zalsa) -> &$zalsa_struct::IngredientImpl<Self> {
+                        Self::ingredient_(zalsa)
+                    }
+                }
+
+                fn ingredient_(zalsa: &$zalsa::Zalsa) -> &$zalsa_struct::IngredientImpl<Self> {
                     static CACHE: $zalsa::IngredientCache<$zalsa_struct::IngredientImpl<$Configuration>> =
                         $zalsa::IngredientCache::new();
 
@@ -206,65 +234,6 @@ macro_rules! setup_interned_struct {
                     unsafe {
                         CACHE.get_or_create::<$zalsa_struct::JarImpl<$Configuration>, 0>(zalsa)
                     }
-                }
-            }
-
-            impl< $($db_lt_arg)? > $zalsa::AsId for $Struct< $($db_lt_arg)? > {
-                fn as_id(&self) -> ::salsa::Id {
-                    self.0.as_id()
-                }
-            }
-
-            impl< $($db_lt_arg)? > $zalsa::FromId for $Struct< $($db_lt_arg)? > {
-                fn from_id(id: ::salsa::Id) -> Self {
-                    Self(<$Id>::from_id(id), ::std::marker::PhantomData)
-                }
-            }
-
-            unsafe impl< $($db_lt_arg)? > Send for $Struct< $($db_lt_arg)? > {}
-
-            unsafe impl< $($db_lt_arg)? > Sync for $Struct< $($db_lt_arg)? > {}
-
-            $zalsa::macro_if! { $generate_debug_impl =>
-                impl< $($db_lt_arg)? > ::std::fmt::Debug for $Struct< $($db_lt_arg)? > {
-                    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                        Self::default_debug_fmt(*self, f)
-                    }
-                }
-            }
-
-            impl< $($db_lt_arg)? > $zalsa::SalsaStructInDb for $Struct< $($db_lt_arg)? > {
-                type MemoIngredientMap = $zalsa::MemoIngredientSingletonIndex;
-                const LEAF_TYPE_IDS: &'static [$zalsa::ConstTypeId] = &[$zalsa::ConstTypeId::of::<$Struct>()];
-
-                fn lookup_ingredient_index(aux: &$zalsa::Zalsa) -> $zalsa::IngredientIndices {
-                    aux.lookup_jar_by_type::<$zalsa_struct::JarImpl<$Configuration>>().into()
-                }
-
-                fn entries(
-                    zalsa: &$zalsa::Zalsa
-                ) -> impl Iterator<Item = $zalsa::DatabaseKeyIndex> + '_ {
-                    let ingredient_index = zalsa.lookup_jar_by_type::<$zalsa_struct::JarImpl<$Configuration>>();
-                    <$Configuration>::ingredient(zalsa).entries(zalsa).map(|entry| entry.key())
-                }
-
-                #[inline]
-                fn cast(id: $zalsa::Id, type_id: $zalsa::TypeId) -> $zalsa::Option<Self> {
-                    if type_id == $zalsa::TypeId::of::<$Struct>() {
-                        $zalsa::Some(<$Struct as $zalsa::FromId>::from_id(id))
-                    } else {
-                        $zalsa::None
-                    }
-                }
-
-                #[inline]
-                unsafe fn memo_table(
-                    zalsa: &$zalsa::Zalsa,
-                    id: $zalsa::Id,
-                    current_revision: $zalsa::Revision,
-                ) -> $zalsa::MemoTableWithTypes<'_> {
-                    // SAFETY: Guaranteed by caller.
-                    unsafe { zalsa.table().memos::<$zalsa_struct::Value<$Configuration>>(id, current_revision) }
                 }
             }
 
@@ -288,21 +257,7 @@ macro_rules! setup_interned_struct {
                     }
                 }
             }
-
-
-            unsafe impl< $($db_lt_arg)? > $zalsa::Update for $Struct< $($db_lt_arg)? > {
-                unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
-                    $($assert_types_are_update)*
-
-                    if unsafe { *old_pointer } != new_value {
-                        unsafe { *old_pointer = new_value };
-                        true
-                    } else {
-                        false
-                    }
-                }
-            }
-
+            $zalsa::macro_if! { $generate_methods =>
             impl<$db_lt> $Struct< $($db_lt_arg)? >  {
                 pub fn $new_fn<$Db, $($indexed_ty: $zalsa::Lookup<$field_ty> + ::std::hash::Hash,)*>(db: &$db_lt $Db,  $($field_id: $indexed_ty),*) -> Self
                 where
@@ -312,9 +267,12 @@ macro_rules! setup_interned_struct {
                         $field_ty: $zalsa::HashEqLike<$indexed_ty>,
                     )*
                 {
-                    let (zalsa, zalsa_local) = db.zalsas();
-                    $Configuration::ingredient(zalsa).intern(zalsa, zalsa_local,
-                        StructKey::<$db_lt>($($field_id,)* ::std::marker::PhantomData::default()), |_, data| ($($zalsa::Lookup::into_owned(data.$field_index),)*))
+                    let key =
+                        StructKey::<$db_lt>($($field_id,)* ::std::marker::PhantomData::default());
+                    let value = ::salsa::Interned::<$FieldsType>::new(db, key);
+                    let configured_id: $Id =
+                        $zalsa::FromId::from_id($zalsa::AsId::as_id(&value));
+                    Self($zalsa::FromId::from_id($zalsa::AsId::as_id(&configured_id)))
                 }
 
                 $(
@@ -323,42 +281,34 @@ macro_rules! setup_interned_struct {
                     where
                         // FIXME(rust-lang/rust#65991): The `db` argument *should* have the type `dyn Database`
                         $Db: ?Sized + $zalsa::Database,
-                    {
-                        let zalsa = db.zalsa();
-                        let fields = $Configuration::ingredient(zalsa).fields(zalsa, self);
+                {
+                        let fields = ::salsa::Interned::<$FieldsType>::fields(db, self);
                         $zalsa::return_mode_expression!(
                             $field_option,
                             $field_ty,
-                            &fields.$field_index,
+                            &fields.$field_id,
                         )
                     }
                 )*
+
+                /// Returns all fields in one storage read.
+                pub fn $fields_fn<$Db>(self, db: &$db_lt $Db) -> &$db_lt $FieldsType
+                where
+                    $Db: ?Sized + $zalsa::Database,
+                {
+                    ::salsa::Interned::<$FieldsType>::fields(db, self)
+                }
             }
 
-            // Duplication can be dropped here once we no longer allow the `no_lifetime` hack
             $zalsa::macro_if! {
                 iftt ($($db_lt_arg)?) {
                     impl $Struct<'_> {
                         /// Default debug formatting for this struct (may be useful if you define your own `Debug` impl)
                         pub fn default_debug_fmt(this: Self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result
                         where
-                            // rustc rejects trivial bounds, but it cannot see through higher-ranked bounds
-                            // with its check :^)
                             $(for<$db_lt> $field_ty: ::std::fmt::Debug),*
                         {
-                            $zalsa::with_attached_database(|db| {
-                                let zalsa = db.zalsa();
-                                let fields = $Configuration::ingredient(zalsa).fields(zalsa, this);
-                                let mut f = f.debug_struct(stringify!($Struct));
-                                $(
-                                    let f = f.field(stringify!($field_id), &fields.$field_index);
-                                )*
-                                f.finish()
-                            }).unwrap_or_else(|| {
-                                f.debug_tuple(stringify!($Struct))
-                                    .field(&$zalsa::AsId::as_id(&this))
-                                    .finish()
-                            })
+                            ::std::fmt::Debug::fmt($zalsa::Struct::as_repr(&this), f)
                         }
                     }
                 } else {
@@ -366,26 +316,13 @@ macro_rules! setup_interned_struct {
                         /// Default debug formatting for this struct (may be useful if you define your own `Debug` impl)
                         pub fn default_debug_fmt(this: Self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result
                         where
-                            // rustc rejects trivial bounds, but it cannot see through higher-ranked bounds
-                            // with its check :^)
                             $(for<$db_lt> $field_ty: ::std::fmt::Debug),*
                         {
-                            $zalsa::with_attached_database(|db| {
-                                let zalsa = db.zalsa();
-                                let fields = $Configuration::ingredient(zalsa).fields(zalsa, this);
-                                let mut f = f.debug_struct(stringify!($Struct));
-                                $(
-                                    let f = f.field(stringify!($field_id), &fields.$field_index);
-                                )*
-                                f.finish()
-                            }).unwrap_or_else(|| {
-                                f.debug_tuple(stringify!($Struct))
-                                    .field(&$zalsa::AsId::as_id(&this))
-                                    .finish()
-                            })
+                            ::std::fmt::Debug::fmt($zalsa::Struct::as_repr(&this), f)
                         }
                     }
                 }
+            }
             }
         };
     };

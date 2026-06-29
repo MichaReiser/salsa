@@ -55,9 +55,9 @@ fn test1() {
     assert_eq!(compute(&db, l2), 2);
     db.assert_logs(expect![[r#"
         [
-            "compute(List { [salsa id]: Id(1), value: 2, next: Some(List { [salsa id]: Id(0), value: 1, next: None }) })",
-            "accumulated(List { [salsa id]: Id(0), value: 1, next: None })",
-            "compute(List { [salsa id]: Id(0), value: 1, next: None })",
+            "compute(Input(Id(1), List { value: 2, next: Some(Input(Id(0), List { value: 1, next: None })) }))",
+            "accumulated(Input(Id(0), List { value: 1, next: None }))",
+            "compute(Input(Id(0), List { value: 1, next: None }))",
         ]"#]]);
 
     // When we mutate `l1`, we should re-execute `compute` for `l1`,
@@ -67,7 +67,7 @@ fn test1() {
     assert_eq!(compute(&db, l2), 2);
     db.assert_logs(expect![[r#"
         [
-            "accumulated(List { [salsa id]: Id(0), value: 2, next: None })",
-            "compute(List { [salsa id]: Id(0), value: 2, next: None })",
+            "accumulated(Input(Id(0), List { value: 2, next: None }))",
+            "compute(Input(Id(0), List { value: 2, next: None }))",
         ]"#]]);
 }

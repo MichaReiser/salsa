@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use crate::function::VerifyResult;
 use crate::hash::{FxHashSet, FxIndexSet};
 use crate::ingredient::Ingredient;
+use crate::runtime::Stamp;
 use crate::sync::Arc;
 use crate::table::memo::MemoTableTypes;
 use crate::tracked_struct::{Configuration, Value};
@@ -97,7 +98,7 @@ where
         write!(
             fmt,
             "{}.{}({:?})",
-            C::DEBUG_NAME,
+            C::debug_name(),
             C::TRACKED_FIELD_NAMES[self.field_index],
             index
         )
@@ -109,6 +110,17 @@ where
 
     fn jar_kind(&self) -> JarKind {
         JarKind::Struct
+    }
+
+    fn dependency_stamp(&self, zalsa: &Zalsa, input: Id) -> Stamp {
+        let data = <super::IngredientImpl<C>>::data_raw(zalsa.table(), input);
+        Stamp {
+            // SAFETY: the tracked parent owns both values for the lifetime of
+            // this projection ingredient.
+            durability: unsafe { (*data).durability },
+            // SAFETY: revisions are atomic and indexed by this projection.
+            changed_at: unsafe { (&(*data).revisions)[self.field_index].load() },
+        }
     }
 
     fn memo_table_types(&self) -> &Arc<MemoTableTypes> {

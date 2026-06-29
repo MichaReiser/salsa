@@ -36,8 +36,8 @@ fn execute() {
     assert_eq!(interned.len(), 2);
     assert_eq!(interned[0].as_struct(), interned1);
     assert_eq!(interned[1].as_struct(), interned2);
-    assert_eq!(interned[0].value().fields().0, "Salsa");
-    assert_eq!(interned[1].value().fields().0, "Salsa2");
+    assert_eq!(interned[0].value().fields().name, "Salsa");
+    assert_eq!(interned[1].value().fields().name, "Salsa2");
 
     // test input structs
     let input1 = InputStruct::new(&db, 22);
@@ -48,7 +48,7 @@ fn execute() {
 
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].as_struct(), input1);
-    assert_eq!(inputs[0].value().fields().0, 22);
+    assert_eq!(inputs[0].value().fields().field, 22);
 
     // test tracked structs
     let tracked1 = tracked_fn(&db, input1);
@@ -60,5 +60,5 @@ fn execute() {
 
     assert_eq!(tracked.len(), 1);
     assert_eq!(tracked[0].as_struct(), tracked1);
-    assert_eq!(tracked[0].value().fields().0, tracked1.field(&db));
+    assert_eq!(tracked[0].value().fields().field, tracked1.field(&db));
 }

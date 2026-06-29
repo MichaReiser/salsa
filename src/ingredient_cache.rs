@@ -1,4 +1,4 @@
-pub use imp::IngredientCache;
+pub use imp::{IngredientCache, IngredientIndexCache};
 
 #[cfg(feature = "inventory")]
 mod imp {
@@ -9,6 +9,54 @@ mod imp {
 
     use std::any::{TypeId, type_name};
     use std::marker::PhantomData;
+
+    /// Type-erased ingredient-index cache used by declared generic Salsa data.
+    #[doc(hidden)]
+    pub struct IngredientIndexCache {
+        ingredient_index: AtomicU32,
+    }
+
+    impl Default for IngredientIndexCache {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl IngredientIndexCache {
+        const UNINITIALIZED: u32 = u32::MAX;
+
+        pub const fn new() -> Self {
+            Self {
+                ingredient_index: atomic::AtomicU32::new(Self::UNINITIALIZED),
+            }
+        }
+
+        /// Returns the cached ingredient index, initializing it from `J` when needed.
+        ///
+        /// Returns `None` when `J` is not registered in this database.
+        ///
+        /// # Safety
+        ///
+        /// A cache may only ever be used with the same `J` and `OFFSET`.
+        #[inline(always)]
+        pub unsafe fn try_get_or_create<J: Jar, const OFFSET: usize>(
+            &self,
+            zalsa: &Zalsa,
+        ) -> Option<IngredientIndex> {
+            let ingredient_index = self.ingredient_index.load(Ordering::Acquire);
+            if ingredient_index != Self::UNINITIALIZED {
+                // SAFETY: initialized values always come from an IngredientIndex.
+                return Some(unsafe { IngredientIndex::new_unchecked(ingredient_index) });
+            }
+
+            let index = zalsa
+                .try_lookup_jar_by_type_id(TypeId::of::<J>())?
+                .at_offset(OFFSET);
+            self.ingredient_index
+                .store(index.as_u32(), Ordering::Release);
+            Some(index)
+        }
+    }
 
     /// Caches an ingredient index.
     ///
@@ -120,6 +168,63 @@ mod imp {
     use std::mem;
 
     const UNINITIALIZED: u64 = 0;
+
+    /// Type-erased ingredient-index cache used by declared generic Salsa data.
+    #[doc(hidden)]
+    pub struct IngredientIndexCache {
+        cached_data: AtomicU64,
+    }
+
+    impl Default for IngredientIndexCache {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl IngredientIndexCache {
+        pub const fn new() -> Self {
+            Self {
+                cached_data: AtomicU64::new(UNINITIALIZED),
+            }
+        }
+
+        /// Returns the cached ingredient index, initializing it from `J` when needed.
+        ///
+        /// Returns `None` when `J` is not registered in this database.
+        ///
+        /// # Safety
+        ///
+        /// A cache may only ever be used with the same `J` and `OFFSET`.
+        #[inline(always)]
+        pub unsafe fn try_get_or_create<J: Jar, const OFFSET: usize>(
+            &self,
+            zalsa: &Zalsa,
+        ) -> Option<IngredientIndex> {
+            const { assert!(mem::size_of::<(Nonce<StorageNonce>, IngredientIndex)>() == 8) };
+
+            let cached_data = self.cached_data.load(Ordering::Acquire);
+            if cached_data != UNINITIALIZED {
+                // SAFETY: initialized lower bits always come from an IngredientIndex.
+                let index = unsafe { IngredientIndex::new_unchecked(cached_data as u32) };
+                // SAFETY: initialized upper bits are always a non-zero storage nonce.
+                let nonce = Nonce::from_u32(unsafe {
+                    std::num::NonZeroU32::new_unchecked((cached_data >> u32::BITS) as u32)
+                });
+                if zalsa.nonce() == nonce {
+                    return Some(index);
+                }
+            }
+
+            let index = zalsa
+                .try_lookup_jar_by_type_id(TypeId::of::<J>())?
+                .at_offset(OFFSET);
+            let nonce = zalsa.nonce().into_u32().get() as u64;
+            let packed = (nonce << u32::BITS) | index.as_u32() as u64;
+            debug_assert_ne!(packed, UNINITIALIZED);
+            self.cached_data.store(packed, Ordering::Release);
+            Some(index)
+        }
+    }
 
     /// Caches an ingredient index.
     ///

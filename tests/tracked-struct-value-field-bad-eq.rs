@@ -35,8 +35,7 @@ impl From<bool> for BadEq {
 
 #[salsa::tracked]
 struct MyTracked<'db> {
-    #[tracked]
-    field: BadEq,
+    field: salsa::TrackedField<BadEq>,
 }
 
 #[salsa::tracked]
