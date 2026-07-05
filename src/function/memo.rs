@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::cell::UnsafeCell;
 use std::fmt::{Debug, Formatter};
 use std::mem::transmute;
 use std::ptr::NonNull;
@@ -65,8 +66,7 @@ impl<C: Configuration> IngredientImpl<C> {
     ) {
         let map = |memo: &mut Memo<'static, C>| {
             if memo.header.can_evict_value() {
-                // Set the memo value to `None`.
-                memo.value = None;
+                memo.evict_value();
             }
         };
 
@@ -80,7 +80,7 @@ pub struct Memo<'db, C: Configuration> {
     pub(super) header: MemoHeader,
 
     /// The result of the query, if we decide to memoize it.
-    pub(super) value: Option<C::Output<'db>>,
+    value: MemoValue<'db, C>,
 }
 
 #[derive(Debug)]
@@ -169,33 +169,21 @@ impl MemoHeader {
         }
     }
 
-    pub(super) fn tracing_debug(&self, has_value: bool) -> impl std::fmt::Debug + use<'_> {
+    pub(super) fn tracing_debug(&self) -> impl std::fmt::Debug + use<'_> {
         struct TracingDebug<'memo> {
             header: &'memo MemoHeader,
-            has_value: bool,
         }
 
         impl std::fmt::Debug for TracingDebug<'_> {
             fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
                 f.debug_struct("Memo")
-                    .field(
-                        "value",
-                        if self.has_value {
-                            &"Some(<value>)"
-                        } else {
-                            &"None"
-                        },
-                    )
                     .field("verified_at", &self.header.verified_at)
                     .field("revisions", &self.header.revisions)
                     .finish()
             }
         }
 
-        TracingDebug {
-            header: self,
-            has_value,
-        }
+        TracingDebug { header: self }
     }
 
     pub(super) fn remove_outputs(&self, zalsa: &Zalsa, executor: DatabaseKeyIndex) {
@@ -217,20 +205,49 @@ impl<'db, C: Configuration> Memo<'db, C> {
         revisions: QueryRevisions,
     ) -> Self {
         Self {
-            value,
+            value: MemoValue::new(value),
             header: MemoHeader::new(revision_now, revisions),
         }
+    }
+
+    /// Returns the memoized output.
+    ///
+    /// # Safety
+    ///
+    /// Callers must have established that this memo can be read in the current
+    /// revision, must hold the query claim, or must have exclusive access to the
+    /// database. A failed lock-free validation may inspect the header, but must
+    /// not call this method.
+    pub(super) unsafe fn value(&self) -> Option<&C::Output<'db>> {
+        self.value.get()
+    }
+
+    /// Takes an output from a memo replaced by ordinary recomputation.
+    ///
+    /// # Safety
+    ///
+    /// The replacement must already be visible in the memo table, the caller
+    /// must hold the query claim, and validation must have established that no
+    /// current-revision reader can return this output.
+    pub(super) unsafe fn take_replaced_value(&self) -> Option<C::Output<'db>> {
+        // SAFETY: Guaranteed by the caller.
+        unsafe { self.value.take_shared() }
+    }
+
+    fn evict_value(&mut self) {
+        self.value.take_mut();
     }
 
     /// Returns `true` if this memo should be serialized.
     pub(super) fn should_serialize(&self) -> bool {
         // TODO: Serialization is a good opportunity to prune old query results based on
         // the `verified_at` revision.
-        self.value.is_some() && !self.header.may_be_provisional()
+        // SAFETY: Serialization requires exclusive database access.
+        (unsafe { self.value().is_some() }) && !self.header.may_be_provisional()
     }
 
     pub(super) fn tracing_debug(&self) -> impl std::fmt::Debug + use<'_, 'db, C> {
-        self.header.tracing_debug(self.value.is_some())
+        self.header.tracing_debug()
     }
 }
 
@@ -245,11 +262,8 @@ where
     #[cfg(feature = "salsa_unstable")]
     fn memory_usage(&self) -> crate::database::MemoInfo {
         let size_of = std::mem::size_of::<Memo<C>>() + self.header.revisions.allocation_size();
-        let heap_size = if let Some(value) = self.value.as_ref() {
-            C::heap_size(value)
-        } else {
-            Some(0)
-        };
+        // SAFETY: Memory reporting requires exclusive database access.
+        let heap_size = unsafe { self.value() }.map_or(Some(0), C::heap_size);
 
         crate::database::MemoInfo {
             debug_name: C::DEBUG_NAME,
@@ -264,10 +278,51 @@ where
     }
 }
 
+struct MemoValue<'db, C: Configuration> {
+    /// The output is normally immutable. Ordinary recomputation may take it after a
+    /// replacement has been published while lock-free probes still hold the
+    /// surrounding memo's address to inspect its header.
+    value: UnsafeCell<Option<C::Output<'db>>>,
+}
+
+// SAFETY: `C::Output` is `Send + Sync`. Shared mutation of `value` is limited
+// to `Memo::take_replaced_value`, whose safety contract excludes concurrent
+// value access. All other mutation requires `&mut MemoValue`.
+unsafe impl<'db, C: Configuration> Sync for MemoValue<'db, C> {}
+
+impl<C: Configuration> Debug for MemoValue<'_, C> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MemoValue(..)")
+    }
+}
+
+impl<'db, C: Configuration> MemoValue<'db, C> {
+    fn new(value: Option<C::Output<'db>>) -> Self {
+        Self {
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    fn get(&self) -> Option<&C::Output<'db>> {
+        // SAFETY: Callers of `Memo::value` establish that recomputation cannot
+        // race with this borrow.
+        unsafe { (&*self.value.get()).as_ref() }
+    }
+
+    fn take_mut(&mut self) -> Option<C::Output<'db>> {
+        self.value.get_mut().take()
+    }
+
+    unsafe fn take_shared(&self) -> Option<C::Output<'db>> {
+        // SAFETY: The caller guarantees exclusive logical access to the output.
+        unsafe { (&mut *self.value.get()).take() }
+    }
+}
+
 #[cfg(feature = "persistence")]
 mod persistence {
     use crate::function::Configuration;
-    use crate::function::memo::{Memo, MemoHeader};
+    use crate::function::memo::{Memo, MemoHeader, MemoValue};
     use crate::revision::AtomicRevision;
     use crate::zalsa_local::QueryRevisions;
     use crate::zalsa_local::persistence::{MappedQueryRevisions, PersistentQueryOrigin};
@@ -287,17 +342,16 @@ mod persistence {
             &self,
             serialized_origin: PersistentQueryOrigin,
         ) -> MappedMemo<'_, 'db, C> {
-            let Memo {
-                ref value,
-                ref header,
-            } = *self;
+            // SAFETY: Serialization requires exclusive database access.
+            let value = unsafe { self.value() };
+            let Memo { ref header, .. } = *self;
             let MemoHeader {
                 ref verified_at,
                 ref revisions,
             } = *header;
 
             MappedMemo {
-                value: value.as_ref(),
+                value,
                 verified_at: AtomicRevision::from(verified_at.load()),
                 revisions: revisions.with_origin(serialized_origin),
             }
@@ -380,7 +434,7 @@ mod persistence {
             let memo = DeserializeMemo::<C>::deserialize(deserializer)?;
 
             Ok(Memo {
-                value: Some(memo.value.0),
+                value: MemoValue::new(Some(memo.value.0)),
                 header: MemoHeader {
                     verified_at: memo.verified_at,
                     revisions: memo.revisions,

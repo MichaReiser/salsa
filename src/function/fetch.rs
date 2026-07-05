@@ -29,7 +29,7 @@ where
         let memo = self.refresh_memo(db, zalsa, zalsa_local, id);
 
         // SAFETY: We just refreshed the memo so it is guaranteed to contain a value now.
-        let memo_value = unsafe { memo.value.as_ref().unwrap_unchecked() };
+        let memo_value = unsafe { memo.value().unwrap_unchecked() };
 
         self.eviction.record_use(id);
 
@@ -81,17 +81,18 @@ where
     ) -> Option<&'db Memo<'db, C>> {
         let memo = self.get_memo_from_table_for(zalsa, id, memo_ingredient_index)?;
 
-        memo.value.as_ref()?;
-
         let database_key_index = self.database_key_index(id);
 
-        let can_shallow_update = memo
-            .header
-            .shallow_verify_memo(zalsa, database_key_index, true);
+        let can_shallow_update = memo.header.shallow_verify_memo(zalsa, database_key_index);
 
         if can_shallow_update.yes() && !memo.header.may_be_provisional() {
             memo.header
                 .update_shallow(zalsa, database_key_index, can_shallow_update);
+
+            // Read the output only after validation. An eager recomputation may
+            // synchronously take the output of a memo that fails validation.
+            // SAFETY: The header was just validated for the current revision.
+            unsafe { memo.value() }?;
 
             // SAFETY: memo is present in memo_map and we have verified that it is
             // still valid for the current revision.
@@ -136,10 +137,11 @@ where
         let opt_old_memo = self.get_memo_from_table_for(zalsa, id, memo_ingredient_index);
 
         if let Some(old_memo) = opt_old_memo {
-            if old_memo.value.is_some()
+            // SAFETY: `fetch_cold` holds the query claim.
+            if unsafe { old_memo.value() }.is_some()
                 && old_memo
                     .header
-                    .verify_memo(db.into(), &claim_guard, C::CYCLE_STRATEGY, true)
+                    .verify_memo(db.into(), &claim_guard, C::CYCLE_STRATEGY)
             {
                 // SAFETY: memo is present in memo_map and we have verified that it is
                 // still valid for the current revision.
@@ -185,7 +187,9 @@ where
                     // but that would require inserting itself as a cycle head, which either requires clone
                     // on the value OR a concurrent `Vec` for cycle heads.
                     if memo.header.verified_at.load() == zalsa.current_revision()
-                        && memo.value.is_some()
+                        // SAFETY: This is a current-revision provisional memo
+                        // reached reentrantly by the thread owning its query.
+                        && unsafe { memo.value() }.is_some()
                         && revisions.iteration().cancellation_count() == cancellation_count
                         && revisions.cycle_heads().contains(&database_key_index)
                     {
@@ -213,7 +217,9 @@ where
                     .and_then(|old_memo| {
                         let revisions = &old_memo.header.revisions;
                         if old_memo.header.verified_at.load() == zalsa.current_revision()
-                            && old_memo.value.is_some()
+                            // SAFETY: This is a current-revision provisional memo
+                            // reached reentrantly by the thread owning its query.
+                            && unsafe { old_memo.value() }.is_some()
                             && revisions.iteration().cancellation_count() == cancellation_count
                         {
                             Some(revisions.iteration())

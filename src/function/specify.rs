@@ -1,10 +1,9 @@
 #[cfg(feature = "accumulator")]
 use crate::accumulator::accumulated_map::InputAccumulatedValues;
 use crate::active_query::CompletedQuery;
-use crate::function::memo::{Memo, MemoHeader};
+use crate::function::memo::Memo;
 use crate::function::sync::{ClaimResult, Reentrancy};
 use crate::function::{Configuration, IngredientImpl};
-use crate::revision::AtomicRevision;
 use crate::sync::atomic::AtomicBool;
 use crate::tracked_struct::TrackedStructInDb;
 use crate::zalsa::{Zalsa, ZalsaDatabase};
@@ -87,7 +86,10 @@ where
         let old_memo = self.get_memo_from_table_for(zalsa, key, memo_ingredient_index);
 
         if let Some(old_memo) = old_memo {
-            if old_memo.header.verified_at.load() == revision && old_memo.value.is_some() {
+            if old_memo.header.verified_at.load() == revision
+                // SAFETY: `specify_and_record` holds the query claim.
+                && unsafe { old_memo.value() }.is_some()
+            {
                 // A value produced by another query wins this revision.
                 let QueryOriginRef::Assigned(owner) = old_memo.header.origin() else {
                     return;
@@ -140,13 +142,7 @@ where
                 .diff_outputs(zalsa, database_key_index, &completed_query);
         }
 
-        let memo = Memo {
-            value: Some(value),
-            header: MemoHeader {
-                verified_at: AtomicRevision::from(revision),
-                revisions: completed_query.revisions,
-            },
-        };
+        let memo = Memo::new(Some(value), revision, completed_query.revisions);
 
         crate::tracing::debug!(
             "specify: about to add memo {:#?} for key {:?}",

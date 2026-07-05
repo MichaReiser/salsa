@@ -177,10 +177,14 @@ mod persistence {
     impl dyn Database {
         /// Returns a type implementing [`serde::Serialize`], that can be used to serialize the
         /// current state of the database.
+        ///
+        /// This cancels and waits for other database handles before returning
+        /// the serializable view.
         pub fn as_serialize(&mut self) -> impl serde::Serialize + '_ {
+            let zalsa = self.zalsa_mut();
             SerializeDatabase {
-                runtime: self.zalsa().runtime(),
-                ingredients: SerializeIngredients(self.zalsa()),
+                runtime: zalsa.runtime(),
+                ingredients: SerializeIngredients(zalsa),
             }
         }
 
@@ -411,7 +415,14 @@ mod memory_usage {
 
     impl dyn Database {
         /// Returns memory usage information about ingredients in the database.
-        pub fn memory_usage(&self) -> DatabaseInfo {
+        ///
+        /// This cancels and waits for other database handles before inspecting
+        /// memoized values.
+        pub fn memory_usage(&mut self) -> DatabaseInfo {
+            // Memo values may be removed immediately after recomputation.
+            // Quiesce snapshots and workers before borrowing those values.
+            _ = self.zalsa_mut();
+
             let mut queries = HashMap::new();
             let mut structs = Vec::new();
             let mut page_infos = self.zalsa().table().page_infos();

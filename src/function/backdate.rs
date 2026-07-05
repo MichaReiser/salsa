@@ -19,11 +19,10 @@ where
         revisions: &mut QueryRevisions,
         value: &C::Output<'db>,
     ) {
+        // SAFETY: Backdating is performed by the thread holding the query claim.
+        let old_value = unsafe { old_memo.value() };
         if old_memo.header.can_backdate(revisions)
-            && old_memo
-                .value
-                .as_ref()
-                .is_some_and(|old_value| C::values_equal(old_value, value))
+            && old_value.is_some_and(|old_value| C::values_equal(old_value, value))
         {
             old_memo.header.backdate(index, revisions);
         }

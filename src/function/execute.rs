@@ -11,9 +11,11 @@ use crate::plumbing::ZalsaLocal;
 use crate::sync::thread;
 use crate::tracked_struct::Identity;
 use crate::zalsa::{MemoIngredientIndex, Zalsa};
-use crate::zalsa_local::{ActiveQueryGuard, QueryEdge, QueryEdgeKind, QueryRevisions};
+use crate::zalsa_local::{
+    ActiveQueryGuard, QueryEdge, QueryEdgeKind, QueryOriginRef, QueryRevisions,
+};
 use crate::{Cancelled, Cycle, tracing};
-use crate::{DatabaseKeyIndex, Event, EventKind, Id};
+use crate::{DatabaseKeyIndex, Event, EventKind, Id, Revision};
 
 impl<C> IngredientImpl<C>
 where
@@ -113,7 +115,40 @@ where
             memo_ingredient_index,
         );
 
-        if claim_guard.drop() { None } else { Some(memo) }
+        let replaced_value = self.take_replaced_value(opt_old_memo, zalsa.current_revision());
+        let refetch = claim_guard.drop();
+
+        // Wake readers before running a potentially expensive destructor. The
+        // output is still dropped synchronously on the recomputing thread.
+        drop(replaced_value);
+
+        if refetch { None } else { Some(memo) }
+    }
+
+    fn take_replaced_value<'db>(
+        &self,
+        old_memo: Option<&Memo<'db, C>>,
+        current_revision: Revision,
+    ) -> Option<C::Output<'db>> {
+        let old_memo = old_memo?;
+        if old_memo.header.verified_at.load() == current_revision
+            || old_memo.header.may_be_provisional()
+            || old_memo.header.was_cycle_participant()
+        {
+            return None;
+        }
+
+        if matches!(old_memo.header.origin(), QueryOriginRef::Assigned(_)) {
+            // Assigned values are validated by their owning query without
+            // claiming this query, so they do not have the same replacement
+            // exclusivity as ordinarily derived values.
+            return None;
+        }
+
+        // SAFETY: `execute` still holds the query claim, has published the
+        // replacement, and only reaches this point after the old memo failed
+        // validation in the current revision.
+        unsafe { old_memo.take_replaced_value() }
     }
 
     fn execute_maybe_iterate<'db>(
@@ -143,7 +178,8 @@ where
                 zalsa,
                 database_key_index,
                 cancellation_count,
-                old_memo.value.is_some(),
+                // SAFETY: `execute_maybe_iterate` holds the query claim.
+                unsafe { old_memo.value() }.is_some(),
             ) {
                 if previous_iteration.reuse_as_provisional {
                     last_provisional_memo_opt = Some(old_memo);
@@ -230,7 +266,8 @@ where
                 memo
             });
 
-            let last_provisional_value = last_provisional_memo.value.as_ref();
+            // SAFETY: `execute_maybe_iterate` holds the query claim.
+            let last_provisional_value = unsafe { last_provisional_memo.value() };
 
             let last_provisional_value = last_provisional_value.expect(
                 "`fetch_cold_cycle` should have inserted a provisional memo with Cycle::initial",
