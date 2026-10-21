@@ -669,8 +669,9 @@ fn flatten_cycle_head_dependencies(
         // expected index.
         CycleRecoveryStrategy::FallbackImmediate | CycleRecoveryStrategy::Fixpoint => {
             let mut expected_index = 0;
-            // Iterate edges directly to avoid converting each one to a `DatabaseKeyIndex`
-            // and back to a `QueryEdge`. That round trip is costly in large cycles.
+            // Keep input edges in their stored form instead of converting them to a
+            // `DatabaseKeyIndex` and back. The round trip checks a transient `Id` for
+            // every edge in debug builds, which is costly for large cycles.
             for input in memo_header
                 .origin()
                 .edges()
